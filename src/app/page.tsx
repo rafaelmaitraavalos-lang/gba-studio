@@ -160,16 +160,10 @@ export default function Home() {
                       </p>
                       <div className="mt-4 flex items-center gap-2">
                         <Link
-                          href="/project-hub"
+                          href={`/project-hub/${project.id}`}
                           className="rounded-lg bg-accent/10 px-3 py-1 text-sm text-accent transition-colors hover:bg-accent/20"
                         >
-                          Rooms
-                        </Link>
-                        <Link
-                          href="/project-hub/characters"
-                          className="rounded-lg bg-accent/10 px-3 py-1 text-sm text-accent transition-colors hover:bg-accent/20"
-                        >
-                          Characters
+                          Open
                         </Link>
                         <button
                           onClick={() => setDeletingId(project.id)}
