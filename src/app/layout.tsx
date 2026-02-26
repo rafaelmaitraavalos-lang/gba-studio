@@ -6,6 +6,7 @@ import "./globals.css";
 
 const spectral = Spectral({
   weight: ["400", "500", "600"],
+  style: ["normal", "italic"],
   variable: "--font-spectral",
   subsets: ["latin"],
 });
@@ -26,9 +27,10 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  console.log("spectral.variable:", spectral.variable, "spectral.className:", spectral.className);
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${spectral.variable} ${pressStart.variable} antialiased`}>
+      <body className={`${spectral.variable} ${spectral.className} ${pressStart.variable} antialiased`}>
         <ThemeProvider>
           <AuthProvider>{children}</AuthProvider>
         </ThemeProvider>

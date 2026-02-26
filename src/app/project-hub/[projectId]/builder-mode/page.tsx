@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { useProject } from "@/lib/project-context";
 import { getFirebaseDb } from "@/lib/firebase";
-import { collection, doc, getDocs, updateDoc } from "firebase/firestore";
+import { collection, doc, getDoc, getDocs, updateDoc } from "firebase/firestore";
 import {
   GRID_SIZE,
   type Direction,
@@ -581,6 +581,7 @@ export default function BuilderMode() {
 
   const [characters, setCharacters] = useState<SavedCharacter[]>([]);
   const [selectedCharId, setSelectedCharId] = useState<string | null>(null);
+  const [playerCharId, setPlayerCharId] = useState<string | null>(null);
   const [charThumbs, setCharThumbs] = useState<Record<string, string>>({});
   const [savedRooms, setSavedRooms] = useState<SidebarRoom[]>([]);
   const [savedAccessories, setSavedAccessories] = useState<SidebarAccessory[]>([]);
@@ -653,6 +654,19 @@ export default function BuilderMode() {
         })
       );
       setCharThumbs(Object.fromEntries(thumbEntries));
+    });
+  }, [user, projectId]);
+
+  // ── Load player character setting ─────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!user || !projectId) return;
+    const db = getFirebaseDb();
+    getDoc(doc(db, "users", user.uid, "projects", projectId)).then((snap) => {
+      if (snap.exists()) {
+        const id = snap.data().playerCharId as string | undefined;
+        if (id) setPlayerCharId(id);
+      }
     });
   }, [user, projectId]);
 
@@ -823,13 +837,14 @@ export default function BuilderMode() {
   // ── Pre-render character frames ───────────────────────────────────────────────
 
   useEffect(() => {
-    const char = characters.find((c) => c.id === selectedCharId);
+    const activeId = playerCharId ?? selectedCharId;
+    const char = characters.find((c) => c.id === activeId);
     if (!char) return;
     charFrameCacheRef.current.clear();
     preRenderCompositeFrames(char.character.layers).then((cache) => {
       charFrameCacheRef.current = cache;
     });
-  }, [selectedCharId, characters]);
+  }, [playerCharId, selectedCharId, characters]);
 
   // ── Transition helpers ────────────────────────────────────────────────────────
 
@@ -1980,6 +1995,15 @@ export default function BuilderMode() {
     ).catch((err) => console.warn("Failed to delete placed NPC:", err));
   }
 
+  function handleSetPlayerChar(charId: string) {
+    setPlayerCharId(charId);
+    if (!user || !projectId) return;
+    const db = getFirebaseDb();
+    updateDoc(doc(db, "users", user.uid, "projects", projectId), {
+      playerCharId: charId,
+    }).catch((err) => console.warn("Failed to save player character:", err));
+  }
+
   async function handleUpdateMobPath(mobId: string, newPath: { x: number; y: number }[]) {
     if (!user || !currentRoomIdRef.current) return;
     const newMobs = placedMobsRef.current.map((m) =>
@@ -2063,26 +2087,59 @@ export default function BuilderMode() {
               <p className="px-4 py-2 text-xs text-gray-500">No characters saved</p>
             ) : (
               <div className="grid grid-cols-2 gap-2 p-3">
-                {characters.map((char) => (
-                  <button
-                    key={char.id}
-                    onClick={() => setSelectedCharId(char.id)}
-                    className={`flex flex-col items-center gap-1 rounded p-1 transition-all ${
-                      selectedCharId === char.id ? "bg-blue-900/60 ring-1 ring-blue-400" : "hover:bg-gray-700"
-                    }`}
-                  >
-                    <div className="h-10 w-10 overflow-hidden rounded bg-gray-700">
-                      {charThumbs[char.id] ? (
-                        <img src={charThumbs[char.id]} alt={char.name} className="h-full w-full" style={{ imageRendering: "pixelated" }} />
+                {characters.map((char) => {
+                  const isPlayer = playerCharId === char.id;
+                  return (
+                    <div
+                      key={char.id}
+                      className={`flex flex-col items-center gap-1 rounded p-1 transition-all ${
+                        selectedCharId === char.id ? "bg-blue-900/60 ring-1 ring-blue-400" : "hover:bg-gray-700"
+                      }`}
+                    >
+                      {/* Thumbnail — click to select */}
+                      <button
+                        onClick={() => setSelectedCharId(char.id)}
+                        className="relative h-10 w-10 overflow-hidden rounded bg-gray-700"
+                      >
+                        {charThumbs[char.id] ? (
+                          <img src={charThumbs[char.id]} alt={char.name} className="h-full w-full" style={{ imageRendering: "pixelated" }} />
+                        ) : (
+                          <div className="flex h-full w-full items-center justify-center bg-gray-600 text-sm font-bold text-white">
+                            {char.name.charAt(0).toUpperCase()}
+                          </div>
+                        )}
+                        {isPlayer && (
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            viewBox="0 0 16 16"
+                            width={16}
+                            height={16}
+                            className="pointer-events-none absolute right-0 top-0 drop-shadow-[0_0_2px_rgba(0,0,0,0.8)]"
+                            aria-hidden="true"
+                          >
+                            <polygon
+                              points="8,1 10,6 15,6 11,9.5 12.5,15 8,12 3.5,15 5,9.5 1,6 6,6"
+                              fill="#FFD700"
+                              stroke="#B8860B"
+                              strokeWidth="0.5"
+                            />
+                          </svg>
+                        )}
+                      </button>
+                      <span className="max-w-[56px] truncate text-xs text-gray-300 font-ahsing">{char.name}</span>
+                      {isPlayer ? (
+                        <span className="text-[9px] font-semibold text-yellow-400">★ Player</span>
                       ) : (
-                        <div className="flex h-full w-full items-center justify-center bg-gray-600 text-sm font-bold text-white">
-                          {char.name.charAt(0).toUpperCase()}
-                        </div>
+                        <button
+                          onClick={() => handleSetPlayerChar(char.id)}
+                          className="text-[9px] text-gray-500 transition-colors hover:text-yellow-400"
+                        >
+                          Set Player
+                        </button>
                       )}
                     </div>
-                    <span className="max-w-[56px] truncate text-xs text-gray-300 font-ahsing">{char.name}</span>
-                  </button>
-                ))}
+                  );
+                })}
               </div>
             )}
           </TabSection>
