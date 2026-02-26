@@ -10,6 +10,7 @@ import {
   serverTimestamp,
 } from "firebase/firestore";
 import { getFirebaseDb } from "./firebase";
+import type { CustomTile } from "./tiles";
 
 export type RoomType = "room" | "hallway";
 
@@ -24,6 +25,7 @@ export interface ObjectInstance {
   row: number;
   col: number;
   properties: Record<string, unknown>;
+  sprite?: string; // base64 data URI for AI-generated sprite
 }
 
 export interface RoomData {
@@ -35,6 +37,7 @@ export interface RoomData {
   tiles: string[];
   objects: ObjectInstance[];
   playerStart: PlayerStart | null;
+  customTiles?: CustomTile[];
 }
 
 export const ROOM_DIMENSIONS = { cols: 16, rows: 10 } as const;
@@ -95,6 +98,7 @@ export async function createRoom(
     tiles,
     objects: [],
     playerStart: null,
+    customTiles: [],
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
   });
@@ -107,6 +111,7 @@ export async function createRoom(
     tiles,
     objects: [],
     playerStart: null,
+    customTiles: [],
   };
 }
 
@@ -124,6 +129,7 @@ export async function loadRooms(uid: string, projectId: string): Promise<RoomDat
       tiles: data.tiles ?? [],
       objects: data.objects ?? [],
       playerStart: data.playerStart ?? null,
+      customTiles: (data.customTiles as CustomTile[]) ?? [],
     };
   });
 }
@@ -139,6 +145,7 @@ export async function saveRoom(uid: string, projectId: string, room: RoomData): 
       tiles: room.tiles,
       objects: room.objects,
       playerStart: room.playerStart,
+      customTiles: room.customTiles ?? [],
       updatedAt: serverTimestamp(),
     },
     { merge: true }

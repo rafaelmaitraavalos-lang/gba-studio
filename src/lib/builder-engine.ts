@@ -1,10 +1,13 @@
 import type { RoomData, ObjectInstance } from "./rooms";
-import { TILE_TYPES } from "./tiles";
+import { TILE_TYPES, isCustomTileId } from "./tiles";
+import type { LayeredCharacter } from "./characters";
 
 export interface GameState {
   currentRoomId: string;
   playerPos: { row: number; col: number };
   playerDirection: "up" | "down" | "left" | "right";
+  playerCharacter: LayeredCharacter | null;
+  playerFrame: number;
   rooms: Map<string, RoomData>;
   isPaused: boolean;
   activeInteraction: Interaction | null;
@@ -30,6 +33,8 @@ export function initGameState(rooms: RoomData[]): GameState {
     currentRoomId: startRoom?.id ?? "",
     playerPos,
     playerDirection: "down",
+    playerCharacter: null,
+    playerFrame: 0,
     rooms: roomMap,
     isPaused: false,
     activeInteraction: null,
@@ -43,6 +48,11 @@ export function checkCollision(room: RoomData, row: number, col: number): boolea
   if (!tileId) return false;
   // Wall and water are impassable
   if (tileId === "wall" || tileId === "water") return true;
+  // Custom tiles check walkable property
+  if (isCustomTileId(tileId)) {
+    const customTile = room.customTiles?.find((ct) => ct.id === tileId);
+    if (customTile && !customTile.walkable) return true;
+  }
   return false;
 }
 
@@ -97,7 +107,7 @@ export function movePlayer(state: GameState, direction: Direction): GameState {
   const newRow = state.playerPos.row + dr;
   const newCol = state.playerPos.col + dc;
 
-  const newState = { ...state, playerDirection: direction };
+  const newState = { ...state, playerDirection: direction, playerFrame: (state.playerFrame + 1) % 4 };
 
   if (checkCollision(room, newRow, newCol)) {
     return newState;

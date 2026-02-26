@@ -1,358 +1,188 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { useProject } from "@/lib/project-context";
-import { TILE_TYPES, type TileType } from "@/lib/tiles";
+import { getFirebaseDb } from "@/lib/firebase";
 import {
-  type RoomData,
-  type RoomType,
-  type ObjectInstance,
-  loadRooms,
-  createRoom,
-  saveRoom,
-  deleteRoom,
-  tilesToGrid,
-  gridToTiles,
-} from "@/lib/rooms";
-import {
-  OBJECT_TYPES,
-  type ObjectType,
-  getDefaultProperties,
-  getObjectTypeDef,
-} from "@/lib/objects";
+  collection,
+  addDoc,
+  getDocs,
+  deleteDoc,
+  doc,
+  serverTimestamp,
+} from "firebase/firestore";
 import ProjectHubNav from "@/components/project-hub/ProjectHubNav";
 
-const TILE_SIZE = 32;
-const DEPTH_HEIGHT = 6;
+const WALLS = ["north", "south", "east", "west"] as const;
+type Wall = (typeof WALLS)[number];
 
-type ActiveLayer = "tiles" | "objects" | "playerStart";
-
-function getTileDef(id: string): TileType | undefined {
-  return TILE_TYPES.find((t) => t.id === id);
+interface DoorConfig {
+  wall: Wall;
+  label: string;
 }
 
-let nextObjId = 1;
-function genObjId() {
-  return `obj_${Date.now()}_${nextObjId++}`;
+interface GeneratedRoom {
+  grid: string[][];
+  doors: { wall: string; x: number; label: string }[];
+  image: string | null;
+  enhancedPrompt: string;
 }
 
-export default function RoomBuilder() {
+interface SavedRoom {
+  id: string;
+  name: string;
+  description: string;
+  imageUrl: string;
+  grid: string[][];
+  doors: { wall: string; x: number; label: string }[];
+}
+
+export default function RoomGenerator() {
   const { user, loading } = useAuth();
   const { projectId } = useProject();
   const router = useRouter();
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const isPaintingRef = useRef(false);
 
-  const [rooms, setRooms] = useState<RoomData[]>([]);
-  const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
-  const [selectedTile, setSelectedTile] = useState<string | null>("grass");
-  const [activeLayer, setActiveLayer] = useState<ActiveLayer>("tiles");
-  const [selectedObjectType, setSelectedObjectType] = useState<ObjectType>("chest");
-  const [editingObject, setEditingObject] = useState<ObjectInstance | null>(null);
+  const [roomName, setRoomName] = useState("");
+  const [description, setDescription] = useState("");
+  const [doors, setDoors] = useState<DoorConfig[]>([]);
+
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [generated, setGenerated] = useState<GeneratedRoom | null>(null);
+  const [genError, setGenError] = useState<string | null>(null);
+
+  const [savedRooms, setSavedRooms] = useState<SavedRoom[]>([]);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
-  const [showNewRoomForm, setShowNewRoomForm] = useState(false);
-  const [newRoomName, setNewRoomName] = useState("");
-  const [newRoomType, setNewRoomType] = useState<RoomType>("room");
-  const [editingRoomName, setEditingRoomName] = useState<string | null>(null);
-  const [deletingRoomId, setDeletingRoomId] = useState<string | null>(null);
-  const [roomsLoaded, setRoomsLoaded] = useState(false);
 
-  const activeRoom = rooms.find((r) => r.id === activeRoomId) ?? null;
-  const cols = activeRoom?.cols ?? 16;
-  const rows = activeRoom?.rows ?? 10;
-  const canvasWidth = cols * TILE_SIZE;
-  const canvasHeight = rows * TILE_SIZE;
-
-  // Auth gate
   useEffect(() => {
     if (!loading && !user) router.replace("/login");
   }, [loading, user, router]);
 
-  // Load rooms
+  // Load saved rooms
   useEffect(() => {
     if (!user || !projectId) return;
-    loadRooms(user.uid, projectId).then(async (loaded) => {
-      if (loaded.length === 0) {
-        const firstRoom = await createRoom(user.uid, projectId, "Room 1", "room");
-        setRooms([firstRoom]);
-        setActiveRoomId(firstRoom.id);
-      } else {
-        setRooms(loaded);
-        setActiveRoomId(loaded[0].id);
-      }
-      setRoomsLoaded(true);
+    const db = getFirebaseDb();
+    getDocs(
+      collection(db, "users", user.uid, "projects", projectId, "rooms")
+    ).then((snapshot) => {
+      const items: SavedRoom[] = [];
+      snapshot.forEach((d) => {
+        const data = d.data();
+        items.push({
+          id: d.id,
+          name: (data.name as string) ?? "Room",
+          description: (data.description as string) ?? "",
+          imageUrl: (data.imageBase64 as string) ?? "",
+          grid: data.gridJson ? (JSON.parse(data.gridJson as string) as string[][]) : [],
+          doors: (data.doors as { wall: string; x: number; label: string }[]) ?? [],
+        });
+      });
+      setSavedRooms(items);
     });
   }, [user, projectId]);
 
-  // Draw canvas
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas || !activeRoom) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
+  // Door management
+  const addDoor = useCallback(() => {
+    if (doors.length >= 4) return;
+    const usedWalls = new Set(doors.map((d) => d.wall));
+    const nextWall = WALLS.find((w) => !usedWalls.has(w)) ?? "north";
+    setDoors((prev) => [...prev, { wall: nextWall, label: "" }]);
+  }, [doors]);
 
-    ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, canvasWidth, canvasHeight);
-
-    const grid = tilesToGrid(activeRoom.tiles, activeRoom.cols, activeRoom.rows);
-
-    // Draw tiles
-    for (let row = 0; row < activeRoom.rows; row++) {
-      for (let col = 0; col < activeRoom.cols; col++) {
-        const x = col * TILE_SIZE;
-        const y = row * TILE_SIZE;
-        const tileId = grid[row]?.[col];
-
-        if (tileId) {
-          const def = getTileDef(tileId);
-          if (def) {
-            if (def.depthColor) {
-              ctx.fillStyle = def.color;
-              ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE - DEPTH_HEIGHT);
-              ctx.fillStyle = def.depthColor;
-              ctx.fillRect(x, y + TILE_SIZE - DEPTH_HEIGHT, TILE_SIZE, DEPTH_HEIGHT);
-            } else {
-              ctx.fillStyle = def.color;
-              ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
-            }
-          }
-        } else {
-          ctx.fillStyle = (row + col) % 2 === 0 ? "#F5F5F5" : "#EBEBEB";
-          ctx.fillRect(x, y, TILE_SIZE, TILE_SIZE);
-        }
-      }
-    }
-
-    // Draw objects
-    for (const obj of activeRoom.objects) {
-      const def = getObjectTypeDef(obj.type);
-      if (!def) continue;
-      const x = obj.col * TILE_SIZE;
-      const y = obj.row * TILE_SIZE;
-      ctx.fillStyle = def.color;
-      ctx.globalAlpha = 0.8;
-      ctx.fillRect(x + 2, y + 2, TILE_SIZE - 4, TILE_SIZE - 4);
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = "#FFFFFF";
-      ctx.font = "bold 16px sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(def.icon, x + TILE_SIZE / 2, y + TILE_SIZE / 2);
-    }
-
-    // Draw player start
-    if (activeRoom.playerStart) {
-      const px = activeRoom.playerStart.col * TILE_SIZE;
-      const py = activeRoom.playerStart.row * TILE_SIZE;
-      ctx.fillStyle = "#22C55E";
-      ctx.globalAlpha = 0.7;
-      ctx.beginPath();
-      ctx.arc(px + TILE_SIZE / 2, py + TILE_SIZE / 2, TILE_SIZE / 2 - 4, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.globalAlpha = 1;
-      ctx.fillStyle = "#FFFFFF";
-      ctx.font = "bold 14px sans-serif";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText("P", px + TILE_SIZE / 2, py + TILE_SIZE / 2);
-    }
-
-    // Grid lines
-    ctx.strokeStyle = "rgba(0,0,0,0.08)";
-    ctx.lineWidth = 1;
-    for (let c = 0; c <= activeRoom.cols; c++) {
-      const x = c * TILE_SIZE + 0.5;
-      ctx.beginPath();
-      ctx.moveTo(x, 0);
-      ctx.lineTo(x, canvasHeight);
-      ctx.stroke();
-    }
-    for (let r = 0; r <= activeRoom.rows; r++) {
-      const y = r * TILE_SIZE + 0.5;
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(canvasWidth, y);
-      ctx.stroke();
-    }
-  }, [activeRoom, canvasWidth, canvasHeight]);
-
-  const getGridPos = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const canvas = canvasRef.current;
-      if (!canvas || !activeRoom) return null;
-      const rect = canvas.getBoundingClientRect();
-      const scaleX = canvasWidth / rect.width;
-      const scaleY = canvasHeight / rect.height;
-      const col = Math.floor((e.clientX - rect.left) * scaleX / TILE_SIZE);
-      const row = Math.floor((e.clientY - rect.top) * scaleY / TILE_SIZE);
-      if (col < 0 || col >= activeRoom.cols || row < 0 || row >= activeRoom.rows) return null;
-      return { row, col };
-    },
-    [activeRoom, canvasWidth, canvasHeight]
-  );
-
-  const updateActiveRoom = useCallback(
-    (updater: (room: RoomData) => RoomData) => {
-      setRooms((prev) =>
-        prev.map((r) => (r.id === activeRoomId ? updater(r) : r))
-      );
-    },
-    [activeRoomId]
-  );
-
-  const paintTile = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const pos = getGridPos(e);
-      if (!pos || !activeRoom) return;
-
-      if (activeLayer === "tiles") {
-        const grid = tilesToGrid(activeRoom.tiles, activeRoom.cols, activeRoom.rows);
-        if (grid[pos.row][pos.col] === selectedTile) return;
-        const newGrid = grid.map((r) => [...r]);
-        newGrid[pos.row][pos.col] = selectedTile;
-        updateActiveRoom((room) => ({
-          ...room,
-          tiles: gridToTiles(newGrid, room.cols, room.rows),
-        }));
-      } else if (activeLayer === "objects") {
-        // Check if object exists at this position
-        const existing = activeRoom.objects.find(
-          (o) => o.row === pos.row && o.col === pos.col
-        );
-        if (existing) {
-          if (selectedObjectType === null as unknown) {
-            // Eraser mode — remove object
-            updateActiveRoom((room) => ({
-              ...room,
-              objects: room.objects.filter((o) => o.id !== existing.id),
-            }));
-          } else {
-            setEditingObject(existing);
-          }
-        } else if (selectedObjectType) {
-          const newObj: ObjectInstance = {
-            id: genObjId(),
-            type: selectedObjectType,
-            row: pos.row,
-            col: pos.col,
-            properties: getDefaultProperties(selectedObjectType),
-          };
-          updateActiveRoom((room) => ({
-            ...room,
-            objects: [...room.objects, newObj],
-          }));
-        }
-      } else if (activeLayer === "playerStart") {
-        updateActiveRoom((room) => ({
-          ...room,
-          playerStart: { row: pos.row, col: pos.col },
-        }));
-      }
-    },
-    [getGridPos, activeRoom, activeLayer, selectedTile, selectedObjectType, updateActiveRoom]
-  );
-
-  const handleMouseDown = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
-      if (activeLayer === "tiles") isPaintingRef.current = true;
-      paintTile(e);
-    },
-    [paintTile, activeLayer]
-  );
-
-  const handleMouseMove = useCallback(
-    (e: React.MouseEvent<HTMLCanvasElement>) => {
-      if (!isPaintingRef.current) return;
-      paintTile(e);
-    },
-    [paintTile]
-  );
-
-  const stopPainting = useCallback(() => {
-    isPaintingRef.current = false;
+  const removeDoor = useCallback((idx: number) => {
+    setDoors((prev) => prev.filter((_, i) => i !== idx));
   }, []);
 
+  const updateDoor = useCallback((idx: number, field: "wall" | "label", value: string) => {
+    setDoors((prev) =>
+      prev.map((d, i) => (i === idx ? { ...d, [field]: value } : d))
+    );
+  }, []);
+
+  const handleGenerate = useCallback(async () => {
+    if (!description.trim() || isGenerating) return;
+    setIsGenerating(true);
+    setGenError(null);
+    setGenerated(null);
+    try {
+      const res = await fetch("/api/generate-room", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: roomName.trim() || "Untitled Room",
+          description: description.trim(),
+          doors,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setGenError(data.error ?? "Generation failed");
+        return;
+      }
+      setGenerated(data);
+    } catch {
+      setGenError("Failed to generate room");
+    } finally {
+      setIsGenerating(false);
+    }
+  }, [roomName, description, doors, isGenerating]);
+
   const handleSave = useCallback(async () => {
-    if (!user || !activeRoom) return;
+    if (!user || !generated) return;
     setSaveStatus("saving");
     try {
-      // Save all rooms
-      for (const room of rooms) {
-        await saveRoom(user.uid, projectId, room);
-      }
+      const db = getFirebaseDb();
+      const name = roomName.trim() || "Untitled Room";
+      const docRef = await addDoc(
+        collection(db, "users", user.uid, "projects", projectId, "rooms"),
+        {
+          name,
+          description: description.trim(),
+          imageBase64: generated.image ?? "",
+          gridJson: JSON.stringify(generated.grid),
+          doors: generated.doors,
+          createdAt: serverTimestamp(),
+        }
+      );
+      setSavedRooms((prev) => [
+        ...prev,
+        {
+          id: docRef.id,
+          name,
+          description: description.trim(),
+          imageUrl: generated.image ?? "",
+          grid: generated.grid,
+          doors: generated.doors,
+        },
+      ]);
       setSaveStatus("saved");
       setTimeout(() => setSaveStatus("idle"), 1500);
     } catch (err) {
       console.error("Save failed:", err);
       setSaveStatus("idle");
     }
-  }, [user, projectId, rooms, activeRoom]);
+  }, [user, projectId, generated, roomName, description]);
 
-  const handleCreateRoom = useCallback(async () => {
-    if (!user || !newRoomName.trim()) return;
-    const room = await createRoom(user.uid, projectId, newRoomName.trim(), newRoomType);
-    setRooms((prev) => [...prev, room]);
-    setActiveRoomId(room.id);
-    setShowNewRoomForm(false);
-    setNewRoomName("");
-    setNewRoomType("room");
-  }, [user, projectId, newRoomName, newRoomType]);
-
-  const handleDeleteRoom = useCallback(
+  const handleDelete = useCallback(
     async (roomId: string) => {
-      if (!user) return;
-      await deleteRoom(user.uid, projectId, roomId);
-      setRooms((prev) => {
-        const next = prev.filter((r) => r.id !== roomId);
-        if (activeRoomId === roomId && next.length > 0) {
-          setActiveRoomId(next[0].id);
-        }
-        return next;
-      });
-      setDeletingRoomId(null);
+      if (!user || !window.confirm("Delete this room?")) return;
+      try {
+        const db = getFirebaseDb();
+        await deleteDoc(
+          doc(db, "users", user.uid, "projects", projectId, "rooms", roomId)
+        );
+        setSavedRooms((prev) => prev.filter((r) => r.id !== roomId));
+      } catch (err) {
+        console.error("Delete failed:", err);
+      }
     },
-    [user, projectId, activeRoomId]
+    [user, projectId]
   );
 
-  const handleRenameRoom = useCallback(
-    (roomId: string, newName: string) => {
-      if (!newName.trim()) return;
-      setRooms((prev) =>
-        prev.map((r) => (r.id === roomId ? { ...r, name: newName.trim() } : r))
-      );
-      setEditingRoomName(null);
-    },
-    []
-  );
+  const handleNavSave = useCallback(() => {}, []);
 
-  const handleRemoveObject = useCallback(() => {
-    if (!editingObject || !activeRoom) return;
-    updateActiveRoom((room) => ({
-      ...room,
-      objects: room.objects.filter((o) => o.id !== editingObject.id),
-    }));
-    setEditingObject(null);
-  }, [editingObject, activeRoom, updateActiveRoom]);
-
-  const handleUpdateObjectProp = useCallback(
-    (key: string, value: unknown) => {
-      if (!editingObject) return;
-      const updatedObj = {
-        ...editingObject,
-        properties: { ...editingObject.properties, [key]: value },
-      };
-      setEditingObject(updatedObj);
-      updateActiveRoom((room) => ({
-        ...room,
-        objects: room.objects.map((o) => (o.id === updatedObj.id ? updatedObj : o)),
-      }));
-    },
-    [editingObject, updateActiveRoom]
-  );
-
-  if (loading || !user || !roomsLoaded) {
+  if (loading || !user) {
     return (
       <div className="flex min-h-screen items-center justify-center">
         <p className="text-gray-500">Loading...</p>
@@ -362,368 +192,274 @@ export default function RoomBuilder() {
 
   return (
     <div className="flex min-h-screen flex-col">
-      <ProjectHubNav projectId={projectId} onSave={handleSave} saveStatus={saveStatus} />
+      <ProjectHubNav
+        projectId={projectId}
+        onSave={handleNavSave}
+        saveStatus="idle"
+        saveDisabled
+      />
 
-      <div className="flex flex-1">
-        {/* Sidebar */}
-        <aside className="w-[220px] shrink-0 overflow-y-auto border-r border-gray-200 p-4">
-          {/* Room list */}
-          <h2 className="mb-3 text-xs font-bold uppercase tracking-wider text-gray-400">
-            Rooms
-          </h2>
-          <div className="flex flex-col gap-1">
-            {rooms.map((room) => (
-              <div key={room.id} className="group relative">
-                {deletingRoomId === room.id ? (
-                  <div className="flex items-center gap-1 rounded-lg bg-red-50 px-2 py-1.5">
-                    <span className="text-xs text-red-600">Delete?</span>
-                    <button
-                      onClick={() => handleDeleteRoom(room.id)}
-                      className="ml-auto text-xs font-semibold text-red-600 hover:text-red-800"
-                    >
-                      Yes
-                    </button>
-                    <button
-                      onClick={() => setDeletingRoomId(null)}
-                      className="text-xs text-gray-500 hover:text-gray-700"
-                    >
-                      No
-                    </button>
-                  </div>
-                ) : editingRoomName === room.id ? (
-                  <input
-                    autoFocus
-                    defaultValue={room.name}
-                    className="w-full rounded-lg border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-accent"
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") handleRenameRoom(room.id, (e.target as HTMLInputElement).value);
-                      if (e.key === "Escape") setEditingRoomName(null);
-                    }}
-                    onBlur={(e) => handleRenameRoom(room.id, e.target.value)}
-                  />
-                ) : (
-                  <button
-                    onClick={() => setActiveRoomId(room.id)}
-                    onDoubleClick={() => setEditingRoomName(room.id)}
-                    className={`flex w-full items-center justify-between rounded-lg px-2 py-1.5 text-left text-sm transition-all ${
-                      activeRoomId === room.id
-                        ? "ring-2 ring-accent bg-blue-50 font-medium"
-                        : "hover:bg-gray-50"
-                    }`}
-                  >
-                    <span className="truncate">
-                      {room.name}
-                      <span className="ml-1 text-xs text-gray-400">
-                        ({room.type === "hallway" ? "H" : "R"})
-                      </span>
-                    </span>
-                    {rooms.length > 1 && (
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setDeletingRoomId(room.id);
-                        }}
-                        className="hidden text-gray-400 hover:text-red-500 group-hover:block"
-                      >
-                        &times;
-                      </button>
-                    )}
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
+      <div className="flex flex-1 flex-col items-center bg-gray-50 p-8">
+        <h1 className="mb-6 text-2xl font-ahsing text-foreground">
+          Room Generator
+        </h1>
 
-          {showNewRoomForm ? (
-            <div className="mt-2 rounded-lg border border-gray-200 bg-white p-2">
-              <input
-                autoFocus
-                placeholder="Room name"
-                value={newRoomName}
-                onChange={(e) => setNewRoomName(e.target.value)}
-                className="w-full rounded border border-gray-300 px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-accent"
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") handleCreateRoom();
-                  if (e.key === "Escape") setShowNewRoomForm(false);
-                }}
-              />
-              <div className="mt-2 flex gap-1">
-                <button
-                  onClick={() => setNewRoomType("room")}
-                  className={`flex-1 rounded px-2 py-1 text-xs font-medium ${
-                    newRoomType === "room"
-                      ? "bg-accent text-white"
-                      : "bg-gray-100 text-gray-600"
-                  }`}
-                >
-                  Room
-                </button>
-                <button
-                  onClick={() => setNewRoomType("hallway")}
-                  className={`flex-1 rounded px-2 py-1 text-xs font-medium ${
-                    newRoomType === "hallway"
-                      ? "bg-accent text-white"
-                      : "bg-gray-100 text-gray-600"
-                  }`}
-                >
-                  Hallway
-                </button>
-              </div>
-              <div className="mt-2 flex gap-1">
-                <button
-                  onClick={handleCreateRoom}
-                  className="flex-1 rounded bg-accent px-2 py-1 text-xs font-semibold text-white hover:bg-blue-700"
-                >
-                  Create
-                </button>
-                <button
-                  onClick={() => setShowNewRoomForm(false)}
-                  className="rounded px-2 py-1 text-xs text-gray-500 hover:bg-gray-100"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => setShowNewRoomForm(true)}
-              className="mt-2 w-full rounded-lg border border-dashed border-gray-300 px-2 py-1.5 text-sm text-gray-500 hover:border-accent hover:text-accent"
-            >
-              + New Room
-            </button>
-          )}
-
-          <hr className="my-4 border-gray-200" />
-
-          {/* Layer toggle */}
-          <h2 className="mb-3 text-xs font-bold uppercase tracking-wider text-gray-400">
-            Layer
-          </h2>
-          <div className="flex flex-col gap-1">
-            {(["tiles", "objects", "playerStart"] as ActiveLayer[]).map((layer) => (
-              <button
-                key={layer}
-                onClick={() => {
-                  setActiveLayer(layer);
-                  setEditingObject(null);
-                }}
-                className={`rounded-lg px-2 py-1.5 text-left text-sm transition-all ${
-                  activeLayer === layer
-                    ? "ring-2 ring-accent bg-blue-50 font-medium"
-                    : "hover:bg-gray-50"
-                }`}
-              >
-                {layer === "tiles" ? "Tiles" : layer === "objects" ? "Objects" : "Player Start"}
-              </button>
-            ))}
-          </div>
-
-          <hr className="my-4 border-gray-200" />
-
-          {/* Layer-specific palette */}
-          {activeLayer === "tiles" && (
-            <>
-              <h2 className="mb-3 text-xs font-bold uppercase tracking-wider text-gray-400">
-                Tiles
-              </h2>
-              <div className="flex flex-col gap-2">
-                {TILE_TYPES.map((tile) => (
-                  <button
-                    key={tile.id}
-                    onClick={() => setSelectedTile(tile.id)}
-                    className={`flex items-center gap-3 rounded-lg px-2 py-1.5 text-left text-sm transition-all ${
-                      selectedTile === tile.id
-                        ? "ring-2 ring-accent bg-blue-50"
-                        : "hover:bg-gray-50"
-                    }`}
-                  >
-                    <span
-                      className="block h-8 w-8 shrink-0 rounded"
-                      style={{ backgroundColor: tile.color }}
-                    />
-                    <span>{tile.label}</span>
-                  </button>
-                ))}
-              </div>
-              <hr className="my-4 border-gray-200" />
-              <h2 className="mb-3 text-xs font-bold uppercase tracking-wider text-gray-400">
-                Tools
-              </h2>
-              <button
-                onClick={() => setSelectedTile(null)}
-                className={`flex items-center gap-3 rounded-lg px-2 py-1.5 text-left text-sm transition-all ${
-                  selectedTile === null
-                    ? "ring-2 ring-accent bg-blue-50"
-                    : "hover:bg-gray-50"
-                }`}
-              >
-                <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded bg-gray-200 text-base">
-                  &#x2715;
-                </span>
-                <span>Eraser</span>
-              </button>
-            </>
-          )}
-
-          {activeLayer === "objects" && (
-            <>
-              <h2 className="mb-3 text-xs font-bold uppercase tracking-wider text-gray-400">
-                Objects
-              </h2>
-              <div className="flex flex-col gap-2">
-                {OBJECT_TYPES.map((obj) => (
-                  <button
-                    key={obj.type}
-                    onClick={() => setSelectedObjectType(obj.type)}
-                    className={`flex items-center gap-3 rounded-lg px-2 py-1.5 text-left text-sm transition-all ${
-                      selectedObjectType === obj.type
-                        ? "ring-2 ring-accent bg-blue-50"
-                        : "hover:bg-gray-50"
-                    }`}
-                  >
-                    <span
-                      className="flex h-8 w-8 shrink-0 items-center justify-center rounded text-sm font-bold text-white"
-                      style={{ backgroundColor: obj.color }}
-                    >
-                      {obj.icon}
-                    </span>
-                    <span>{obj.label}</span>
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-
-          {activeLayer === "playerStart" && (
-            <p className="text-sm text-gray-500">
-              Click a tile to set the player start position for this room.
-            </p>
-          )}
-        </aside>
-
-        {/* Canvas area */}
-        <main className="flex flex-1 items-center justify-center bg-gray-50 p-8">
-          {activeRoom && (
-            <canvas
-              ref={canvasRef}
-              width={canvasWidth}
-              height={canvasHeight}
-              className="pixelated border border-gray-300"
-              style={{ cursor: "crosshair" }}
-              onMouseDown={handleMouseDown}
-              onMouseMove={handleMouseMove}
-              onMouseUp={stopPainting}
-              onMouseLeave={stopPainting}
+        {/* Generator controls */}
+        <div className="w-full max-w-md space-y-4">
+          {/* Room name */}
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1">
+              Room Name
+            </label>
+            <input
+              type="text"
+              value={roomName}
+              onChange={(e) => setRoomName(e.target.value)}
+              placeholder="e.g. Dungeon Cell, Throne Room"
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-accent"
+              disabled={isGenerating}
             />
-          )}
-        </main>
+          </div>
 
-        {/* Right panel: Object properties */}
-        {editingObject && (
-          <aside className="w-[250px] shrink-0 border-l border-gray-200 p-4">
-            <div className="mb-3 flex items-center justify-between">
-              <h2 className="text-xs font-bold uppercase tracking-wider text-gray-400">
-                Properties
-              </h2>
-              <button
-                onClick={() => setEditingObject(null)}
-                className="text-gray-400 hover:text-gray-600"
-              >
-                &times;
-              </button>
-            </div>
-            <p className="mb-3 text-sm font-medium capitalize">
-              {editingObject.type}
-            </p>
+          {/* Description */}
+          <div>
+            <label className="block text-xs font-medium text-gray-500 mb-1">
+              Description
+            </label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder='e.g. "dark stone dungeon cell with a torch on the wall and a chest in the corner"'
+              rows={3}
+              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-accent resize-none"
+              disabled={isGenerating}
+            />
+          </div>
 
-            {editingObject.type === "door" && (
-              <label className="block text-sm">
-                <span className="text-gray-600">Target Room</span>
-                <select
-                  value={(editingObject.properties.targetRoomId as string) ?? ""}
-                  onChange={(e) => handleUpdateObjectProp("targetRoomId", e.target.value)}
-                  className="mt-1 block w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-accent"
+          {/* Door configuration */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-xs font-medium text-gray-500">
+                Doors ({doors.length}/4)
+              </label>
+              {doors.length < 4 && (
+                <button
+                  onClick={addDoor}
+                  disabled={isGenerating}
+                  className="text-xs font-medium text-accent hover:text-blue-700 disabled:opacity-50"
                 >
-                  <option value="">-- None --</option>
-                  {rooms
-                    .filter((r) => r.id !== activeRoomId)
-                    .map((r) => (
-                      <option key={r.id} value={r.id}>
-                        {r.name}
+                  + Add Door
+                </button>
+              )}
+            </div>
+
+            {doors.length === 0 && (
+              <p className="text-xs text-gray-400 py-2">
+                No doors added. Click &quot;+ Add Door&quot; to connect rooms.
+              </p>
+            )}
+
+            <div className="space-y-2">
+              {doors.map((door, idx) => (
+                <div
+                  key={idx}
+                  className="flex items-center gap-2 rounded border border-gray-200 bg-white p-2"
+                >
+                  <select
+                    value={door.wall}
+                    onChange={(e) => updateDoor(idx, "wall", e.target.value)}
+                    disabled={isGenerating}
+                    className="rounded border border-gray-300 px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
+                  >
+                    {WALLS.map((w) => (
+                      <option key={w} value={w}>
+                        {w.charAt(0).toUpperCase() + w.slice(1)}
                       </option>
                     ))}
-                </select>
-              </label>
-            )}
-
-            {editingObject.type === "chest" && (
-              <label className="block text-sm">
-                <span className="text-gray-600">Item</span>
-                <input
-                  type="text"
-                  value={(editingObject.properties.item as string) ?? ""}
-                  onChange={(e) => handleUpdateObjectProp("item", e.target.value)}
-                  className="mt-1 block w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-accent"
-                />
-              </label>
-            )}
-
-            {editingObject.type === "npc" && (
-              <label className="block text-sm">
-                <span className="text-gray-600">Dialogue</span>
-                <textarea
-                  value={(editingObject.properties.dialogue as string) ?? ""}
-                  onChange={(e) => handleUpdateObjectProp("dialogue", e.target.value)}
-                  rows={3}
-                  className="mt-1 block w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-accent"
-                />
-              </label>
-            )}
-
-            {editingObject.type === "enemy" && (
-              <div className="space-y-3">
-                <label className="block text-sm">
-                  <span className="text-gray-600">HP</span>
+                  </select>
                   <input
-                    type="number"
-                    value={(editingObject.properties.hp as number) ?? 10}
-                    onChange={(e) => handleUpdateObjectProp("hp", Number(e.target.value))}
-                    className="mt-1 block w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-accent"
+                    type="text"
+                    value={door.label}
+                    onChange={(e) => updateDoor(idx, "label", e.target.value)}
+                    placeholder="Destination (e.g. Throne Room)"
+                    disabled={isGenerating}
+                    className="flex-1 rounded border border-gray-300 px-2 py-1 text-xs focus:outline-none focus:ring-1 focus:ring-accent"
                   />
-                </label>
-                <label className="block text-sm">
-                  <span className="text-gray-600">Damage</span>
-                  <input
-                    type="number"
-                    value={(editingObject.properties.damage as number) ?? 2}
-                    onChange={(e) => handleUpdateObjectProp("damage", Number(e.target.value))}
-                    className="mt-1 block w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-accent"
-                  />
-                </label>
+                  <button
+                    onClick={() => removeDoor(idx)}
+                    disabled={isGenerating}
+                    className="text-sm text-red-400 hover:text-red-600 px-1"
+                  >
+                    &times;
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Generate button */}
+          <button
+            onClick={handleGenerate}
+            disabled={isGenerating || !description.trim()}
+            className="w-full rounded-lg bg-purple-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            {isGenerating ? "Generating room..." : "Generate Room"}
+          </button>
+
+          {genError && (
+            <p className="text-sm text-red-500">{genError}</p>
+          )}
+        </div>
+
+        {/* Preview */}
+        {generated && (
+          <div className="mt-6 flex flex-col items-center space-y-3">
+            {generated.image ? (
+              <img
+                src={generated.image}
+                alt="Generated room"
+                className="pixelated rounded border border-gray-300"
+                style={{ width: 480, height: 320, imageRendering: "pixelated" }}
+              />
+            ) : (
+              <div
+                className="flex items-center justify-center rounded border border-gray-300 bg-gray-100 text-gray-400 text-sm"
+                style={{ width: 480, height: 320 }}
+              >
+                Image generation failed — grid data saved
               </div>
             )}
 
-            {editingObject.type === "sign" && (
-              <label className="block text-sm">
-                <span className="text-gray-600">Text</span>
-                <textarea
-                  value={(editingObject.properties.text as string) ?? ""}
-                  onChange={(e) => handleUpdateObjectProp("text", e.target.value)}
-                  rows={3}
-                  className="mt-1 block w-full rounded border border-gray-300 px-2 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-accent"
-                />
-              </label>
-            )}
+            {/* Tile grid mini-preview */}
+            <div className="flex flex-col items-center">
+              <span className="mb-1 text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                Tile Grid
+              </span>
+              <TileGridPreview grid={generated.grid} />
+            </div>
 
             <button
-              onClick={handleRemoveObject}
-              className="mt-4 w-full rounded-lg bg-red-50 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-100"
+              onClick={handleSave}
+              disabled={saveStatus === "saving"}
+              className="rounded-lg bg-green-600 px-6 py-2 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-50 transition-colors"
             >
-              Remove Object
+              {saveStatus === "saving"
+                ? "Saving..."
+                : saveStatus === "saved"
+                  ? "Saved!"
+                  : "Save to Library"}
             </button>
-          </aside>
+          </div>
         )}
+
+        {/* Room library */}
+        <div className="mt-10 w-full max-w-2xl">
+          <h2 className="mb-4 text-xs font-bold uppercase tracking-wider text-gray-400">
+            Room Library ({savedRooms.length})
+          </h2>
+
+          {savedRooms.length === 0 ? (
+            <p className="text-center text-sm text-gray-400 py-8">
+              No rooms saved yet. Generate one above!
+            </p>
+          ) : (
+            <div className="grid grid-cols-3 gap-4">
+              {savedRooms.map((room) => (
+                <RoomCard
+                  key={room.id}
+                  room={room}
+                  onDelete={() => handleDelete(room.id)}
+                />
+              ))}
+            </div>
+          )}
+        </div>
       </div>
+    </div>
+  );
+}
+
+const TILE_COLORS: Record<string, string> = {
+  W: "#4a4a5a",
+  F: "#8a7a6a",
+  D: "#6ab04c",
+  C: "#f9ca24",
+  T: "#eb4d4b",
+  B: "#7b5e3b",
+  S: "#a0a0b0",
+};
+
+function TileGridPreview({ grid }: { grid: string[][] }) {
+  if (!grid || grid.length === 0) return null;
+  const cellSize = 6;
+  const rows = grid.length;
+  const cols = grid[0].length;
+
+  return (
+    <div
+      className="rounded border border-gray-300 overflow-hidden"
+      style={{
+        display: "grid",
+        gridTemplateColumns: `repeat(${cols}, ${cellSize}px)`,
+        gridTemplateRows: `repeat(${rows}, ${cellSize}px)`,
+      }}
+    >
+      {grid.flatMap((row, r) =>
+        row.map((tile, c) => (
+          <div
+            key={`${r}-${c}`}
+            style={{
+              width: cellSize,
+              height: cellSize,
+              backgroundColor: TILE_COLORS[tile] ?? "#555",
+            }}
+          />
+        ))
+      )}
+    </div>
+  );
+}
+
+function RoomCard({
+  room,
+  onDelete,
+}: {
+  room: SavedRoom;
+  onDelete: () => void;
+}) {
+  return (
+    <div className="flex flex-col items-center rounded-lg border border-gray-200 bg-white p-3">
+      {room.imageUrl ? (
+        <img
+          src={room.imageUrl}
+          alt={room.name}
+          className="pixelated block rounded"
+          style={{ width: 160, height: 107, imageRendering: "pixelated" }}
+        />
+      ) : room.grid && room.grid.length > 0 ? (
+        <TileGridPreview grid={room.grid} />
+      ) : (
+        <div
+          className="flex items-center justify-center rounded bg-gray-100 text-gray-300 text-xs"
+          style={{ width: 160, height: 107 }}
+        >
+          ?
+        </div>
+      )}
+      <p className="mt-2 text-sm text-gray-700 truncate w-full text-center font-ahsing">
+        {room.name}
+      </p>
+      {room.doors.length > 0 && (
+        <span className="text-[10px] text-gray-400">
+          {room.doors.length} door{room.doors.length > 1 ? "s" : ""}
+        </span>
+      )}
+      <button
+        onClick={onDelete}
+        className="mt-1 text-[10px] text-red-400 hover:text-red-600"
+      >
+        Delete
+      </button>
     </div>
   );
 }

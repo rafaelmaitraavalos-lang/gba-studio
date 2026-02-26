@@ -1,10 +1,12 @@
 import type { Metadata } from "next";
-import { Syne, Press_Start_2P } from "next/font/google";
+import { Spectral, Press_Start_2P } from "next/font/google";
 import { AuthProvider } from "@/lib/auth-context";
+import { ThemeProvider } from "@/lib/theme-context";
 import "./globals.css";
 
-const syne = Syne({
-  variable: "--font-syne",
+const spectral = Spectral({
+  weight: ["400", "500", "600"],
+  variable: "--font-spectral",
   subsets: ["latin"],
 });
 
@@ -25,9 +27,11 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className={`${syne.variable} ${pressStart.variable} antialiased`}>
-        <AuthProvider>{children}</AuthProvider>
+    <html lang="en" suppressHydrationWarning>
+      <body className={`${spectral.variable} ${pressStart.variable} antialiased`}>
+        <ThemeProvider>
+          <AuthProvider>{children}</AuthProvider>
+        </ThemeProvider>
       </body>
     </html>
   );

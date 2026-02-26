@@ -81,13 +81,18 @@ export default function Home() {
     <div className="flex min-h-screen flex-col">
       {/* Navbar */}
       <nav className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
-        <span className="font-pixel text-sm text-accent">GBA Studio</span>
-        <button
-          onClick={() => signOut(getFirebaseAuth())}
-          className="text-sm text-gray-500 hover:text-foreground"
-        >
-          Log Out
-        </button>
+        <img src='/logo.png' alt='GBA Studio' style={{ height: '48px' }} />
+        <div className="flex items-center gap-4">
+          <Link href="/settings" className="text-sm text-gray-500 hover:text-foreground">
+            Settings
+          </Link>
+          <button
+            onClick={() => signOut(getFirebaseAuth())}
+            className="text-sm text-gray-500 hover:text-foreground"
+          >
+            Log Out
+          </button>
+        </div>
       </nav>
 
       <main className="flex flex-1 flex-col items-center px-4 py-10">
@@ -148,7 +153,7 @@ export default function Home() {
                     </div>
                   ) : (
                     <>
-                      <h2 className="text-lg font-semibold text-foreground">
+                      <h2 className="text-lg text-foreground font-ahsing">
                         {project.name}
                       </h2>
                       <p className="mt-1 text-sm text-gray-500">

@@ -1,6 +1,6 @@
-export const GRID_SIZE = 16;
-export const PIXEL_DISPLAY_SIZE = 25;
-export const CANVAS_SIZE = GRID_SIZE * PIXEL_DISPLAY_SIZE; // 400
+export const GRID_SIZE = 64;
+export const PIXEL_DISPLAY_SIZE = 4;
+export const CANVAS_SIZE = GRID_SIZE * PIXEL_DISPLAY_SIZE; // 256
 export const FRAME_ANIMATION_DELAY = 150;
 
 export const GBA_PALETTE: string[] = [
@@ -12,16 +12,35 @@ export const GBA_PALETTE: string[] = [
 
 export type PixelData = (string | null)[][];
 export type Direction = "down" | "up" | "left" | "right";
-export type FrameIndex = 0 | 1 | 2;
+export type FrameIndex = 0 | 1 | 2 | 3;
+export type FrameTuple = [PixelData, PixelData, PixelData, PixelData];
 
 export interface CharacterSprite {
   name: string;
   frames: {
-    walkDown: [PixelData, PixelData, PixelData];
-    walkUp: [PixelData, PixelData, PixelData];
-    walkLeft: [PixelData, PixelData, PixelData];
-    walkRight: [PixelData, PixelData, PixelData];
+    walkDown: FrameTuple;
+    walkUp: FrameTuple;
+    walkLeft: FrameTuple;
+    walkRight: FrameTuple;
   };
+}
+
+/* ── Layer-based character system ── */
+
+export interface CharacterLayer {
+  id: string;
+  name: string;           // e.g. "base", "clothing", "hat", "cape", "weapon"
+  spritesheet: string;    // base64 data URI of the 4x4 spritesheet image
+  zIndex: number;
+}
+
+export interface LayeredCharacter {
+  name: string;
+  layers: CharacterLayer[];
+}
+
+export function createEmptyLayeredCharacter(): LayeredCharacter {
+  return { name: "New Character", layers: [] };
 }
 
 export function createEmptyPixelData(): PixelData {
@@ -34,10 +53,10 @@ export function createEmptySprite(): CharacterSprite {
   return {
     name: "New Character",
     frames: {
-      walkDown: [createEmptyPixelData(), createEmptyPixelData(), createEmptyPixelData()],
-      walkUp: [createEmptyPixelData(), createEmptyPixelData(), createEmptyPixelData()],
-      walkLeft: [createEmptyPixelData(), createEmptyPixelData(), createEmptyPixelData()],
-      walkRight: [createEmptyPixelData(), createEmptyPixelData(), createEmptyPixelData()],
+      walkDown: [createEmptyPixelData(), createEmptyPixelData(), createEmptyPixelData(), createEmptyPixelData()],
+      walkUp: [createEmptyPixelData(), createEmptyPixelData(), createEmptyPixelData(), createEmptyPixelData()],
+      walkLeft: [createEmptyPixelData(), createEmptyPixelData(), createEmptyPixelData(), createEmptyPixelData()],
+      walkRight: [createEmptyPixelData(), createEmptyPixelData(), createEmptyPixelData(), createEmptyPixelData()],
     },
   };
 }

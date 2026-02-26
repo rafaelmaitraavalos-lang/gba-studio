@@ -51,7 +51,7 @@ export default function NewProject() {
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center px-4">
-      <h1 className="font-pixel text-2xl text-accent">GBA Studio</h1>
+      <img src='/logo.png' alt='GBA Studio' style={{ height: '120px' }} />
 
       <input
         ref={inputRef}

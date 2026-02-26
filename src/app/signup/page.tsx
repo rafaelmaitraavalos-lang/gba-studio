@@ -49,9 +49,16 @@ export default function SignupPage() {
       await createUserWithEmailAndPassword(getFirebaseAuth(), email, password);
       router.replace("/");
     } catch (err: unknown) {
-      const message =
-        err instanceof Error ? err.message : "Failed to create account.";
-      setError(message.replace(/Firebase:\s?/, "").replace(/\(auth\/.*\)\.?/, "").trim() || "Failed to create account.");
+      const code = (err as { code?: string }).code ?? "";
+      const friendlyMessages: Record<string, string> = {
+        "auth/email-already-in-use":    "An account with this email already exists.",
+        "auth/invalid-email":           "Please enter a valid email address.",
+        "auth/weak-password":           "Password must be at least 6 characters.",
+        "auth/operation-not-allowed":   "Email sign-up is not enabled.",
+        "auth/network-request-failed":  "Network error. Please check your connection.",
+        "auth/too-many-requests":       "Too many attempts. Please try again later.",
+      };
+      setError(friendlyMessages[code] ?? (err instanceof Error ? err.message : "Failed to create account."));
     } finally {
       setSubmitting(false);
     }
@@ -59,7 +66,7 @@ export default function SignupPage() {
 
   return (
     <div className="flex min-h-screen flex-col items-center justify-center px-4">
-      <h1 className="font-pixel mb-10 text-lg text-accent">GBA Studio</h1>
+      <img src='/logo.png' alt='GBA Studio' style={{ height: '120px' }} className="mb-10" />
 
       <div className="w-full max-w-sm">
         <h2 className="mb-6 text-2xl font-bold">Sign Up</h2>

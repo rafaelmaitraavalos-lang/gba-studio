@@ -17,13 +17,17 @@ export default function ProjectHubNav({ projectId, onSave, saveStatus, saveDisab
   const TABS = [
     { label: "Hub", href: base },
     { label: "Rooms", href: `${base}/rooms` },
+    { label: "Objects", href: `${base}/objects` },
+    { label: "Mobs", href: `${base}/mobs` },
+    { label: "NPCs", href: `${base}/npcs` },
     { label: "Characters", href: `${base}/characters` },
+    { label: "Accessories", href: `${base}/accessories` },
   ];
 
   return (
     <nav className="flex items-center justify-between border-b border-gray-200 px-6 py-4">
       <div className="flex items-center gap-6">
-        <span className="font-pixel text-sm text-accent">GBA Studio</span>
+        <img src='/logo.png' alt='GBA Studio' style={{ height: '48px' }} />
         <Link href="/" className="text-sm text-gray-500 hover:text-foreground">
           &larr; Back
         </Link>
@@ -34,7 +38,7 @@ export default function ProjectHubNav({ projectId, onSave, saveStatus, saveDisab
               <Link
                 key={tab.href}
                 href={tab.href}
-                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+                className={`rounded-lg px-3 py-1.5 text-sm font-ahsing transition-colors ${
                   isActive
                     ? "bg-accent text-white"
                     : "text-gray-600 hover:bg-gray-100"

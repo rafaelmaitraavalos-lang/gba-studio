@@ -1,5 +1,12 @@
 @import "tailwindcss";
 
+@font-face {
+  font-family: 'Ahsing';
+  src: url('/Ahsing-Regular.otf') format('opentype');
+  font-weight: normal;
+  font-style: normal;
+}
+
 :root {
   --background: #ffffff;
   --foreground: #1a1a1a;
@@ -10,8 +17,9 @@
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-accent: var(--accent);
-  --font-sans: var(--font-syne);
+  --font-sans: var(--font-spectral);
   --font-pixel: var(--font-press-start);
+  --font-ahsing: 'Ahsing', sans-serif;
 }
 
 body {
@@ -23,4 +31,46 @@ body {
 .pixelated {
   image-rendering: pixelated;
   image-rendering: crisp-edges;
+}
+
+/* ── Dark mode ─────────────────────────────────────────────── */
+.dark {
+  --background: #0e0e11;
+  --foreground: #f0f0f3;
+  color-scheme: dark;
+}
+
+/* Backgrounds */
+.dark .bg-white          { background-color: #1c1c20; }
+.dark .bg-gray-50        { background-color: #0e0e11; }
+.dark .bg-gray-100       { background-color: #1e1e23; }
+.dark .bg-gray-200       { background-color: #2a2a30; }
+
+/* Borders */
+.dark .border-gray-100   { border-color: #252529; }
+.dark .border-gray-200   { border-color: #2d2d35; }
+.dark .border-gray-300   { border-color: #3a3a44; }
+.dark .divide-gray-100 > * + * { border-color: #252529; }
+
+/* Text */
+.dark .text-gray-400     { color: #7f7f8c; }
+.dark .text-gray-500     { color: #6e6e7b; }
+.dark .text-gray-600     { color: #a8a8b8; }
+.dark .text-gray-700     { color: #ccccda; }
+
+/* Form controls (no bg-* class set, so browser defaults to white) */
+.dark input[type="text"],
+.dark input[type="email"],
+.dark input[type="password"],
+.dark textarea,
+.dark select {
+  background-color: #1e1e23;
+  color: #f0f0f3;
+  border-color: #3a3a44;
+}
+
+/* Placeholder text */
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: #5a5a66;
 }
