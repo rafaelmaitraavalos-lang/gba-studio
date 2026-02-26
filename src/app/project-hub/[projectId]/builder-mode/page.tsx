@@ -74,6 +74,52 @@ interface PlacedObject {
   height: number;
   flippedH: boolean;
   flippedV: boolean;
+  hitbox?: { left: number; top: number; right: number; bottom: number };
+}
+
+interface SpriteBounds {
+  left: number;   // normalized 0–1 fraction of sprite width
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+function computeSpriteBounds(img: HTMLImageElement): SpriteBounds {
+  const w = img.naturalWidth;
+  const h = img.naturalHeight;
+  if (w === 0 || h === 0) return { left: 0.2, top: 0.6, right: 0.8, bottom: 1.0 };
+  const off = document.createElement("canvas");
+  off.width = w;
+  off.height = h;
+  const ctx = off.getContext("2d")!;
+  ctx.drawImage(img, 0, 0);
+  const data = ctx.getImageData(0, 0, w, h).data;
+  const STEP = 4;
+  const ALPHA_THRESHOLD = 20;
+  let minX = w, minY = h, maxX = 0, maxY = 0, found = false;
+  for (let y = 0; y < h; y += STEP) {
+    for (let x = 0; x < w; x += STEP) {
+      if (data[(y * w + x) * 4 + 3] > ALPHA_THRESHOLD) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+        found = true;
+      }
+    }
+  }
+  if (!found) return { left: 0.2, top: 0.6, right: 0.8, bottom: 1.0 };
+  return {
+    left:   Math.max(0, minX - STEP) / w,
+    top:    Math.max(0, minY - STEP) / h,
+    right:  Math.min(w, maxX + STEP) / w,
+    bottom: Math.min(h, maxY + STEP) / h,
+  };
+}
+
+const DEFAULT_HITBOX = { left: 0.2, top: 0.0, right: 0.8, bottom: 0.65 };
+function getHitbox(po: PlacedObject) {
+  return po.hitbox ?? DEFAULT_HITBOX;
 }
 
 interface SavedMob {
@@ -261,24 +307,27 @@ function isBlocked(grid: string[][] | null, x: number, y: number): boolean {
   return false;
 }
 
-function isBlockedByObject(objects: PlacedObject[], x: number, y: number): boolean {
-  // Use the player's feet area (bottom half) for a natural feel
-  const feetTop    = y + Math.floor(CHAR_SIZE / 2);
-  const feetBottom = y + CHAR_SIZE;
-  const feetLeft   = x;
-  const feetRight  = x + CHAR_SIZE;
+function isBlockedByObject(
+  objects: PlacedObject[],
+  boundsCache: Map<string, SpriteBounds>,
+  x: number,
+  y: number,
+): boolean {
+  // Small foot rectangle: 8px wide, 4px tall, centered at bottom of player sprite
+  const footCx  = x + Math.floor(CHAR_SIZE / 2);
+  const footL   = footCx - 4;
+  const footR   = footCx + 4;
+  const footB   = y + CHAR_SIZE;
+  const footT   = footB - 4;
   for (const po of objects) {
-    // Tighter collision box: bottom 40% height, middle 60% width
-    const colX = po.x + po.width  * 0.2;
-    const colW = po.width  * 0.6;
-    const colY = po.y + po.height * 0.6;
-    const colH = po.height * 0.4;
-    if (
-      feetLeft  < colX + colW &&
-      feetRight > colX        &&
-      feetTop   < colY + colH &&
-      feetBottom > colY
-    ) return true;
+    const hb = getHitbox(po);
+    const colX = po.x + po.width  * hb.left;
+    const colW = po.width  * (hb.right - hb.left);
+    const colY = po.y + po.height * hb.top;
+    const colH = po.height * (hb.bottom - hb.top);
+    if (footL < colX + colW && footR > colX && footT < colY + colH && footB > colY) {
+      return true;
+    }
   }
   return false;
 }
@@ -486,9 +535,18 @@ export default function BuilderMode() {
   const placedObjectsRef = useRef<PlacedObject[]>([]);
   const draggingObjectRef = useRef<{ id: string; offsetX: number; offsetY: number } | null>(null);
   const objectImgCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
+  const objectBoundsCacheRef = useRef<Map<string, SpriteBounds>>(new Map());
   const editorToolRef = useRef<"door" | "object" | "mob" | "npc" | null>(null);
   const selectedObjectRef = useRef<SavedObject | null>(null);
   const resizingObjectRef = useRef<{ id: string; startMouseX: number; startMouseY: number; startW: number; startH: number } | null>(null);
+  const selectedPlacedObjectIdRef = useRef<string | null>(null);
+  const draggingHitboxHandleRef = useRef<{
+    poId: string;
+    handle: string;
+    origHitbox: { left: number; top: number; right: number; bottom: number };
+    startMouseX: number;
+    startMouseY: number;
+  } | null>(null);
 
   // Placed mob refs
   const placedMobsRef = useRef<PlacedMob[]>([]);
@@ -790,10 +848,41 @@ export default function BuilderMode() {
 
   function preloadPlacedObjectImages(objects: PlacedObject[]) {
     objects.forEach((po) => {
-      if (!po.imageBase64 || objectImgCacheRef.current.has(po.objectId)) return;
+      if (!po.imageBase64) return;
+
+      // Image already in cache — compute bounds now if not yet done
+      if (objectImgCacheRef.current.has(po.objectId)) {
+        if (!objectBoundsCacheRef.current.has(po.objectId)) {
+          const cached = objectImgCacheRef.current.get(po.objectId)!;
+          if (cached.complete) {
+            try {
+              objectBoundsCacheRef.current.set(po.objectId, computeSpriteBounds(cached));
+            } catch (err) {
+              console.error(`[SpriteBounds] failed for cached objectId=${po.objectId}`, err);
+            }
+          }
+        }
+        return;
+      }
+
       const img = new Image();
+      img.onload = () => {
+        try {
+          objectBoundsCacheRef.current.set(po.objectId, computeSpriteBounds(img));
+        } catch (err) {
+          console.error(`[SpriteBounds] failed for objectId=${po.objectId}`, err);
+        }
+      };
       img.src = po.imageBase64;
       objectImgCacheRef.current.set(po.objectId, img);
+      // Handle synchronous load (browser already has this data URL decoded)
+      if (img.complete && !objectBoundsCacheRef.current.has(po.objectId)) {
+        try {
+          objectBoundsCacheRef.current.set(po.objectId, computeSpriteBounds(img));
+        } catch (err) {
+          console.error(`[SpriteBounds] failed (sync) for objectId=${po.objectId}`, err);
+        }
+      }
     });
   }
 
@@ -964,11 +1053,23 @@ export default function BuilderMode() {
       const grace = spawnGraceFramesRef.current > 0;
       if (grace) spawnGraceFramesRef.current--;
 
+      // Per-pixel stepping so the player slides flush against walls at any speed
       const objs = placedObjectsRef.current;
-      const candidateX = Math.max(0, Math.min(CANVAS_W - CHAR_SIZE, pos.x + dx));
-      const newX = (!grace && (isBlocked(grid, candidateX, pos.y) || isBlockedByObject(objs, candidateX, pos.y))) ? pos.x : candidateX;
-      const candidateY = Math.max(0, Math.min(CANVAS_H - CHAR_SIZE, pos.y + dy));
-      const newY = (!grace && (isBlocked(grid, newX, candidateY) || isBlockedByObject(objs, newX, candidateY))) ? pos.y : candidateY;
+      const bounds = objectBoundsCacheRef.current;
+      let newX = pos.x;
+      const stepX = Math.sign(dx);
+      for (let i = 0; i < Math.abs(dx); i++) {
+        const next = Math.max(0, Math.min(CANVAS_W - CHAR_SIZE, newX + stepX));
+        if (!grace && (isBlocked(grid, next, pos.y) || isBlockedByObject(objs, bounds, next, pos.y))) break;
+        newX = next;
+      }
+      let newY = pos.y;
+      const stepY = Math.sign(dy);
+      for (let i = 0; i < Math.abs(dy); i++) {
+        const next = Math.max(0, Math.min(CANVAS_H - CHAR_SIZE, newY + stepY));
+        if (!grace && (isBlocked(grid, newX, next) || isBlockedByObject(objs, bounds, newX, next))) break;
+        newY = next;
+      }
       pixelPosRef.current = { x: newX, y: newY };
 
       // ── Animation ──
@@ -1036,7 +1137,6 @@ export default function BuilderMode() {
       }
 
       // ── Draw placed objects (after bg, before player) ──
-      ctx.imageSmoothingEnabled = false;
       for (const po of placedObjectsRef.current) {
         const img = objectImgCacheRef.current.get(po.objectId);
         if (!img || !img.complete || img.naturalWidth === 0) continue;
@@ -1047,10 +1147,8 @@ export default function BuilderMode() {
             po.y + (po.flippedV ? po.height : 0),
           );
           ctx.scale(po.flippedH ? -1 : 1, po.flippedV ? -1 : 1);
-          ctx.imageSmoothingEnabled = false;
           ctx.drawImage(img, 0, 0, po.width, po.height);
         } else {
-          ctx.imageSmoothingEnabled = false;
           ctx.drawImage(img, po.x, po.y, po.width, po.height);
         }
         ctx.restore();
@@ -1065,6 +1163,35 @@ export default function BuilderMode() {
           ctx.strokeStyle = "#374151";
           ctx.lineWidth = 1;
           ctx.strokeRect(po.x + po.width - 8, po.y + po.height - 8, 8, 8);
+          // Hitbox debug overlay (red)
+          const hb = getHitbox(po);
+          const hx = po.x + po.width  * hb.left;
+          const hw = po.width  * (hb.right - hb.left);
+          const hy = po.y + po.height * hb.top;
+          const hh = po.height * (hb.bottom - hb.top);
+          ctx.strokeStyle = "rgba(255, 0, 0, 0.9)";
+          ctx.lineWidth = 1;
+          ctx.strokeRect(hx, hy, hw, hh);
+          ctx.fillStyle = "rgba(255, 0, 0, 0.12)";
+          ctx.fillRect(hx, hy, hw, hh);
+          // 8 resize handles on selected object
+          if (selectedPlacedObjectIdRef.current === po.id) {
+            const HSIZ = 6;
+            const midX = hx + hw / 2, midY = hy + hh / 2;
+            const pts: [number, number][] = [
+              [hx, hy], [midX, hy], [hx + hw, hy],
+              [hx + hw, midY],
+              [hx + hw, hy + hh], [midX, hy + hh], [hx, hy + hh],
+              [hx, midY],
+            ];
+            ctx.fillStyle = "#FFFFFF";
+            ctx.strokeStyle = "#EF4444";
+            ctx.lineWidth = 1;
+            for (const [px, py] of pts) {
+              ctx.fillRect(px - HSIZ / 2, py - HSIZ / 2, HSIZ, HSIZ);
+              ctx.strokeRect(px - HSIZ / 2, py - HSIZ / 2, HSIZ, HSIZ);
+            }
+          }
         }
       }
 
@@ -1081,7 +1208,6 @@ export default function BuilderMode() {
         const frames = mobFrameCacheRef.current.get(mob.mobId);
         const frameCanvas = frames?.[DIRECTION_TO_ROW[mobDir]]?.[mobFrame];
         if (frameCanvas) {
-          ctx.imageSmoothingEnabled = false;
           ctx.drawImage(frameCanvas, drawX, drawY);
         } else {
           ctx.fillStyle = "#EF4444";
@@ -1136,7 +1262,6 @@ export default function BuilderMode() {
         const frames = npcFrameCacheRef.current.get(npc.npcId);
         const frameCanvas = frames?.[DIRECTION_TO_ROW[npcDir]]?.[npcFrame];
         if (frameCanvas) {
-          ctx.imageSmoothingEnabled = false;
           ctx.drawImage(frameCanvas, drawX, drawY);
         } else {
           ctx.fillStyle = "#10B981";
@@ -1162,7 +1287,6 @@ export default function BuilderMode() {
             const cx = Math.round(drawX + NPC_SIZE / 2);
             const headY = drawY;
             ctx.save();
-            ctx.imageSmoothingEnabled = false;
             ctx.globalAlpha = Math.min(1, newAlpha);
             // Measure text with Ahsing font
             ctx.font = "bold 9px 'Ahsing', sans-serif";
@@ -1221,7 +1345,6 @@ export default function BuilderMode() {
       const cacheKey = `${playerDirRef.current}:${playerFrameRef.current}`;
       const cachedFrame = charFrameCacheRef.current.get(cacheKey);
       if (cachedFrame) {
-        ctx.imageSmoothingEnabled = false;
         ctx.drawImage(cachedFrame, x, y, CHAR_SIZE, CHAR_SIZE);
       } else {
         ctx.fillStyle = "#3B82F6";
@@ -1375,6 +1498,36 @@ export default function BuilderMode() {
     if (!canvas) return;
     const { cx, cy } = getCanvasCoords(e, canvas);
 
+    // Check hitbox handles first — highest priority in editor mode
+    if (selectedPlacedObjectIdRef.current) {
+      const selPO = placedObjectsRef.current.find(p => p.id === selectedPlacedObjectIdRef.current);
+      if (selPO) {
+        const hb = getHitbox(selPO);
+        const hx = selPO.x + selPO.width  * hb.left,  hw = selPO.width  * (hb.right - hb.left);
+        const hy = selPO.y + selPO.height * hb.top,   hh = selPO.height * (hb.bottom - hb.top);
+        const midX = hx + hw / 2, midY = hy + hh / 2;
+        const handleMap: [string, number, number][] = [
+          ['nw', hx, hy],       ['n', midX, hy],      ['ne', hx + hw, hy],
+          ['e', hx + hw, midY],
+          ['se', hx + hw, hy + hh], ['s', midX, hy + hh], ['sw', hx, hy + hh],
+          ['w', hx, midY],
+        ];
+        const HSIZ = 6;
+        for (const [handle, px, py] of handleMap) {
+          if (cx >= px - HSIZ && cx <= px + HSIZ && cy >= py - HSIZ && cy <= py + HSIZ) {
+            draggingHitboxHandleRef.current = {
+              poId: selPO.id,
+              handle,
+              origHitbox: { ...getHitbox(selPO) },
+              startMouseX: cx,
+              startMouseY: cy,
+            };
+            return;
+          }
+        }
+      }
+    }
+
     // Check resize handles first — takes priority over any tool
     for (const po of [...placedObjectsRef.current].reverse()) {
       const hx = po.x + po.width - 8;
@@ -1426,10 +1579,13 @@ export default function BuilderMode() {
       const objects = [...placedObjectsRef.current].reverse();
       for (const po of objects) {
         if (cx >= po.x && cx <= po.x + po.width && cy >= po.y && cy <= po.y + po.height) {
+          selectedPlacedObjectIdRef.current = po.id;
           draggingObjectRef.current = { id: po.id, offsetX: cx - po.x, offsetY: cy - po.y };
           return;
         }
       }
+      // Clicking empty space clears selection
+      selectedPlacedObjectIdRef.current = null;
       // Place new object
       const src = selectedObjectRef.current;
       if (!src) return;
@@ -1548,6 +1704,23 @@ export default function BuilderMode() {
     if (!canvas) return;
     const { cx, cy } = getCanvasCoords(e, canvas);
 
+    if (draggingHitboxHandleRef.current) {
+      const { poId, handle, origHitbox, startMouseX, startMouseY } = draggingHitboxHandleRef.current;
+      const po = placedObjectsRef.current.find(p => p.id === poId);
+      if (!po) return;
+      const dxF = (cx - startMouseX) / po.width;
+      const dyF = (cy - startMouseY) / po.height;
+      let { left, top, right, bottom } = origHitbox;
+      if (handle.includes('w')) left   = Math.max(0,   Math.min(right  - 0.05, left   + dxF));
+      if (handle.includes('e')) right  = Math.min(1,   Math.max(left   + 0.05, right  + dxF));
+      if (handle.includes('n')) top    = Math.max(0,   Math.min(bottom - 0.05, top    + dyF));
+      if (handle.includes('s')) bottom = Math.min(1,   Math.max(top    + 0.05, bottom + dyF));
+      const newHitbox = { left, top, right, bottom };
+      setPlacedObjects(prev => prev.map(p => p.id === poId ? { ...p, hitbox: newHitbox } : p));
+      placedObjectsRef.current = placedObjectsRef.current.map(p => p.id === poId ? { ...p, hitbox: newHitbox } : p);
+      return;
+    }
+
     if (resizingObjectRef.current) {
       const r = resizingObjectRef.current;
       const newW = Math.max(32, Math.min(256, Math.round(r.startW + cx - r.startMouseX)));
@@ -1597,6 +1770,19 @@ export default function BuilderMode() {
   }
 
   async function handleCanvasMouseUp() {
+    if (draggingHitboxHandleRef.current) {
+      draggingHitboxHandleRef.current = null;
+      const updatedObjects = placedObjectsRef.current;
+      if (currentRoomIdRef.current) {
+        const db = getFirebaseDb();
+        updateDoc(
+          doc(db, "users", user!.uid, "projects", projectId, "rooms", currentRoomIdRef.current),
+          { placedObjects: updatedObjects }
+        ).catch(err => console.warn("Failed to save hitbox:", err));
+      }
+      return;
+    }
+
     if (resizingObjectRef.current) {
       resizingObjectRef.current = null;
       if (!user || !currentRoomIdRef.current) return;
@@ -2270,6 +2456,7 @@ function MobThumb({ spritesheet }: { spritesheet: string }) {
     if (!canvas || !spritesheet) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
+    ctx.imageSmoothingEnabled = false;
 
     const img = new Image();
     img.onload = () => { imgRef.current = img; };
@@ -2286,7 +2473,6 @@ function MobThumb({ spritesheet }: { spritesheet: string }) {
       if (sheet && sheet.complete && sheet.naturalWidth > 0) {
         const fw = sheet.width / 4;
         const fh = sheet.height / 4;
-        ctx.imageSmoothingEnabled = false;
         ctx.drawImage(sheet, frameRef.current * fw, 2 * fh, fw, fh, 0, 0, 40, 40);
       }
       rafRef.current = requestAnimationFrame(animate);
