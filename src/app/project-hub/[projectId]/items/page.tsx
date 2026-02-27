@@ -240,11 +240,11 @@ export default function ItemGenerator() {
             <p className="mb-6 text-2xl font-ahsing text-foreground">{modalName}</p>
 
             {/* Sprite */}
-            <div className="rounded-xl bg-white border border-gray-200 p-4 shadow-inner">
+            <div className="rounded-xl bg-white border border-gray-200 p-6 shadow-inner">
               <img
                 src={modalImage}
                 alt={modalName}
-                style={{ width: 128, height: 128, imageRendering: "pixelated" }}
+                style={{ display: "block", width: 192, height: 192, imageRendering: "pixelated" }}
               />
             </div>
 
