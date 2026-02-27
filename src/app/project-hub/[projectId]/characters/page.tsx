@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
 import { useProject } from "@/lib/project-context";
 import { getFirebaseDb } from "@/lib/firebase";
@@ -455,6 +456,13 @@ export default function CharacterCreator() {
                   <span className="mt-2 text-xs font-ahsing text-gray-700 truncate w-16 text-center">
                     {sc.name}
                   </span>
+                  <Link
+                    href={`/project-hub/${projectId}/equip?characterId=${sc.id}`}
+                    onClick={(e) => e.stopPropagation()}
+                    className="mt-1 rounded bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent hover:bg-accent hover:text-white transition-colors"
+                  >
+                    Equip →
+                  </Link>
                 </div>
               ))}
 

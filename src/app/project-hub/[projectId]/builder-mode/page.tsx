@@ -215,7 +215,13 @@ interface SidebarAccessory {
   thumbUrl: string;
 }
 
-type SidebarTab = "rooms" | "characters" | "accessories" | "objects" | "mobs" | "npcs" | "editor" | null;
+interface EquippedChar {
+  id: string;
+  name: string;
+  spritesheet: string;
+}
+
+type SidebarTab = "rooms" | "characters" | "equipped" | "objects" | "mobs" | "npcs" | "editor" | null;
 
 // ─── Spritesheet helpers ──────────────────────────────────────────────────────
 
@@ -616,6 +622,8 @@ export default function BuilderMode() {
   const [charThumbs, setCharThumbs] = useState<Record<string, string>>({});
   const [savedRooms, setSavedRooms] = useState<SidebarRoom[]>([]);
   const [savedAccessories, setSavedAccessories] = useState<SidebarAccessory[]>([]);
+  const [equippedChars, setEquippedChars] = useState<EquippedChar[]>([]);
+  const [playerEquippedId, setPlayerEquippedId] = useState<string | null>(null);
   const [savedObjects, setSavedObjects] = useState<SavedObject[]>([]);
   const [selectedObjectId, setSelectedObjectId] = useState<string | null>(null);
   const [placedObjects, setPlacedObjects] = useState<PlacedObject[]>([]);
@@ -698,8 +706,10 @@ export default function BuilderMode() {
     const db = getFirebaseDb();
     getDoc(doc(db, "users", user.uid, "projects", projectId)).then((snap) => {
       if (snap.exists()) {
-        const id = snap.data().playerCharId as string | undefined;
-        if (id) setPlayerCharId(id);
+        const id  = snap.data().playerCharId    as string | undefined;
+        const eid = snap.data().playerEquippedId as string | undefined;
+        if (id)  setPlayerCharId(id);
+        if (eid) setPlayerEquippedId(eid);
       }
     });
   }, [user, projectId]);
@@ -730,7 +740,7 @@ export default function BuilderMode() {
     });
   }, [user, projectId]);
 
-  // ── Load accessories ─────────────────────────────────────────────────────────
+  // ── Load accessories (legacy) ─────────────────────────────────────────────────
 
   useEffect(() => {
     if (!user || !projectId) return;
@@ -743,6 +753,22 @@ export default function BuilderMode() {
           type: (d.data().type as string) ?? "",
           thumbUrl: (d.data().imageBase64 as string) ?? (d.data().imageUrl as string) ?? "",
         }))
+      );
+    });
+  }, [user, projectId]);
+
+  // ── Load equipped characters ───────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!user || !projectId) return;
+    const db = getFirebaseDb();
+    getDocs(collection(db, "users", user.uid, "projects", projectId, "equipped")).then((snap) => {
+      setEquippedChars(
+        snap.docs.map((d) => ({
+          id:          d.id,
+          name:        (d.data().name        as string) ?? "Equipped",
+          spritesheet: (d.data().spritesheet  as string) ?? "",
+        })).filter((e) => e.spritesheet)
       );
     });
   }, [user, projectId]);
@@ -876,6 +902,18 @@ export default function BuilderMode() {
   // ── Pre-render character frames ───────────────────────────────────────────────
 
   useEffect(() => {
+    // Prefer equipped character, then player char, then selected char
+    const equip = playerEquippedId
+      ? equippedChars.find((e) => e.id === playerEquippedId)
+      : null;
+
+    if (equip) {
+      const fakeLayer: CharacterLayer = { id: "equip_base", name: "base", spritesheet: equip.spritesheet, zIndex: 0 };
+      charFrameCacheRef.current.clear();
+      preRenderCompositeFrames([fakeLayer]).then((cache) => { charFrameCacheRef.current = cache; });
+      return;
+    }
+
     const activeId = playerCharId ?? selectedCharId;
     const char = characters.find((c) => c.id === activeId);
     if (!char) return;
@@ -883,7 +921,7 @@ export default function BuilderMode() {
     preRenderCompositeFrames(char.character.layers).then((cache) => {
       charFrameCacheRef.current = cache;
     });
-  }, [playerCharId, selectedCharId, characters]);
+  }, [playerEquippedId, playerCharId, selectedCharId, characters, equippedChars]);
 
   // ── Transition helpers ────────────────────────────────────────────────────────
 
@@ -2144,11 +2182,24 @@ export default function BuilderMode() {
 
   function handleSetPlayerChar(charId: string) {
     setPlayerCharId(charId);
+    setPlayerEquippedId(null);
     if (!user || !projectId) return;
     const db = getFirebaseDb();
     updateDoc(doc(db, "users", user.uid, "projects", projectId), {
       playerCharId: charId,
+      playerEquippedId: null,
     }).catch((err) => console.warn("Failed to save player character:", err));
+  }
+
+  function handleSetPlayerEquipped(equippedId: string) {
+    setPlayerEquippedId(equippedId);
+    setPlayerCharId(null);
+    if (!user || !projectId) return;
+    const db = getFirebaseDb();
+    updateDoc(doc(db, "users", user.uid, "projects", projectId), {
+      playerEquippedId: equippedId,
+      playerCharId: null,
+    }).catch((err) => console.warn("Failed to save equipped character:", err));
   }
 
   async function handleUpdateMobPath(mobId: string, newPath: { x: number; y: number }[]) {
@@ -2308,27 +2359,42 @@ export default function BuilderMode() {
             )}
           </TabSection>
 
-          {/* Accessories tab */}
-          <TabSection label="Accessories" count={savedAccessories.length} open={activeTab === "accessories"} onToggle={() => toggleTab("accessories")}>
-            {savedAccessories.length === 0 ? (
-              <p className="px-4 py-2 text-xs text-gray-500">No accessories saved</p>
+          {/* Equipped characters tab */}
+          <TabSection label="Equipped" count={equippedChars.length} open={activeTab === "equipped"} onToggle={() => toggleTab("equipped")}>
+            {equippedChars.length === 0 ? (
+              <p className="px-4 py-2 text-xs text-gray-500">No equipped characters saved</p>
             ) : (
               <div className="grid grid-cols-2 gap-2 p-3">
-                {savedAccessories.map((acc) => (
-                  <div key={acc.id} className="flex flex-col items-center gap-1 rounded p-1">
-                    <div className="h-10 w-10 overflow-hidden rounded border border-gray-600 bg-gray-700">
-                      {acc.thumbUrl ? (
-                        <img src={acc.thumbUrl} alt={acc.name} className="h-full w-full object-cover" style={{ imageRendering: "pixelated" }} />
+                {equippedChars.map((ec) => {
+                  const isPlayer = playerEquippedId === ec.id;
+                  return (
+                    <div
+                      key={ec.id}
+                      className="flex flex-col items-center gap-1 rounded p-1 hover:bg-gray-700 transition-all"
+                    >
+                      <div className="relative h-10 w-10 overflow-hidden rounded bg-gray-700">
+                        <img src={ec.spritesheet} alt={ec.name} className="h-full w-full" style={{ imageRendering: "pixelated", objectFit: "none", objectPosition: "0 50%" }} />
+                        {isPlayer && (
+                          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width={16} height={16}
+                            className="pointer-events-none absolute right-0 top-0 drop-shadow-[0_0_2px_rgba(0,0,0,0.8)]" aria-hidden="true">
+                            <polygon points="8,1 10,6 15,6 11,9.5 12.5,15 8,12 3.5,15 5,9.5 1,6 6,6" fill="#FFD700" stroke="#B8860B" strokeWidth="0.5" />
+                          </svg>
+                        )}
+                      </div>
+                      <span className="max-w-[56px] truncate text-xs text-gray-300 font-ahsing">{ec.name}</span>
+                      {isPlayer ? (
+                        <span className="text-[9px] font-semibold text-yellow-400">★ Player</span>
                       ) : (
-                        <div className="flex h-full w-full items-center justify-center">
-                          <span className="text-[9px] text-gray-500">?</span>
-                        </div>
+                        <button
+                          onClick={() => handleSetPlayerEquipped(ec.id)}
+                          className="text-[9px] text-gray-500 transition-colors hover:text-yellow-400"
+                        >
+                          Set Player
+                        </button>
                       )}
                     </div>
-                    <span className="max-w-[56px] truncate text-[10px] text-gray-300">{acc.name}</span>
-                    {acc.type && <span className="text-[9px] text-gray-500">{acc.type}</span>}
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </TabSection>
