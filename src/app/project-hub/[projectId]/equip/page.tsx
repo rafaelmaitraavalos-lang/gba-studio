@@ -36,6 +36,68 @@ const SLOTS = [
 type Slot = typeof SLOTS[number]["id"];
 type EquippedSlots = Partial<Record<Slot, SavedItem>>;
 
+// ─── Spritesheet compositing ──────────────────────────────────────────────────
+
+// Y position (fraction of frame height) and display size (fraction of frame width)
+// for each equipment slot, applied uniformly across all 16 frames.
+const SLOT_PLACEMENT: Record<string, { yFrac: number; sizeFrac: number }> = {
+  head:      { yFrac: 0.05, sizeFrac: 0.35 },
+  body:      { yFrac: 0.35, sizeFrac: 0.42 },
+  hand:      { yFrac: 0.58, sizeFrac: 0.35 },
+  feet:      { yFrac: 0.78, sizeFrac: 0.35 },
+  accessory: { yFrac: 0.15, sizeFrac: 0.28 },
+};
+
+function loadImg(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload  = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+async function compositeEquippedSpritesheet(
+  charSpritesheet: string,
+  items: { slot: string; imageBase64: string }[],
+): Promise<string> {
+  const charImg = await loadImg(charSpritesheet);
+  const W = charImg.naturalWidth, H = charImg.naturalHeight;
+  const frameW = W / 4, frameH = H / 4;
+
+  const canvas = document.createElement("canvas");
+  canvas.width  = W;
+  canvas.height = H;
+  const ctx = canvas.getContext("2d")!;
+  ctx.imageSmoothingEnabled = false;
+
+  // Draw the full character spritesheet as base
+  ctx.drawImage(charImg, 0, 0);
+
+  // Stamp each item icon onto all 16 frames
+  for (const item of items) {
+    const placement = SLOT_PLACEMENT[item.slot];
+    if (!placement) continue;
+    const itemImg = await loadImg(item.imageBase64);
+    const dw = Math.round(frameW * placement.sizeFrac);
+    const dh = Math.round(frameH * placement.sizeFrac);
+
+    ctx.globalAlpha = 0.88;
+    for (let row = 0; row < 4; row++) {
+      for (let col = 0; col < 4; col++) {
+        const fx = col * frameW;
+        const fy = row * frameH;
+        const ix = fx + (frameW - dw) / 2;          // center horizontally in frame
+        const iy = fy + frameH * placement.yFrac;    // position vertically by slot
+        ctx.drawImage(itemImg, ix, iy, dw, dh);
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  return canvas.toDataURL("image/png");
+}
+
 // ─── Character canvas (animated walk preview) ─────────────────────────────────
 
 function CharCanvas({ layers }: { layers: CharacterLayer[] }) {
@@ -262,9 +324,23 @@ function EquipPageInner() {
     setResultImage(null);
     setSaveStatus("idle");
     try {
-      // Send the base layer spritesheet for img2img conditioning
+      // Get the base layer spritesheet (lowest zIndex)
       const sortedLayers = [...selectedChar!.layers].sort((a, b) => a.zIndex - b.zIndex);
-      const characterSpritesheet = sortedLayers[0]?.spritesheet ?? null;
+      const baseSpritesheet = sortedLayers[0]?.spritesheet ?? null;
+
+      // Composite item icons onto the spritesheet so the AI sees them already placed
+      const itemsWithImages = (Object.entries(equipped) as [Slot, SavedItem][])
+        .filter(([, item]) => item?.imageBase64)
+        .map(([slot, item]) => ({ slot, imageBase64: item.imageBase64 }));
+
+      let characterSpritesheet = baseSpritesheet;
+      if (baseSpritesheet && itemsWithImages.length > 0) {
+        try {
+          characterSpritesheet = await compositeEquippedSpritesheet(baseSpritesheet, itemsWithImages);
+        } catch (err) {
+          console.warn("[equip] Compositing failed, using raw spritesheet:", err);
+        }
+      }
 
       const res = await fetch("/api/generate-equipped", {
         method: "POST",

@@ -258,7 +258,8 @@ export default function HubMenu() {
   const [objects,     setObjects]     = useState<ThumbPreview[]>([]);
   const [mobs,        setMobs]        = useState<SpritePreview[]>([]);
   const [npcs,        setNpcs]        = useState<SpritePreview[]>([]);
-  const [items,       setItems]       = useState<ThumbPreview[]>([]);
+  const [equippedChars, setEquippedChars] = useState<SpritePreview[]>([]);
+  const [items,         setItems]         = useState<ThumbPreview[]>([]);
 
   useEffect(() => {
     if (!loading && !user) router.replace("/login");
@@ -293,6 +294,10 @@ export default function HubMenu() {
       setNpcs(snap.docs.map((d) => ({ id: d.id, name: d.data().name ?? "NPC", spritesheet: d.data().spritesheet ?? "" })).filter((n) => n.spritesheet))
     );
 
+    getDocs(collection(db, base, "equipped")).then((snap) =>
+      setEquippedChars(snap.docs.map((d) => ({ id: d.id, name: d.data().name ?? "Equipped", spritesheet: d.data().spritesheet ?? "" })).filter((e) => e.spritesheet))
+    );
+
     getDocs(collection(db, base, "items")).then((snap) =>
       setItems(snap.docs.map((d) => ({ id: d.id, name: d.data().name ?? "Item", imageBase64: d.data().imageBase64 ?? "" })).filter((a) => a.imageBase64))
     );
@@ -323,6 +328,12 @@ export default function HubMenu() {
           label="Build Character"
           description="Draw your hero pixel by pixel"
           preview={<CharWalkCanvas items={characters} />}
+        />
+        <HubCard
+          href={`/project-hub/${projectId}/equip`}
+          label="Equip"
+          description="Dress your characters with items"
+          preview={<SpriteWalkCanvas items={equippedChars} />}
         />
         <HubCard
           href={`/project-hub/${projectId}/objects`}
