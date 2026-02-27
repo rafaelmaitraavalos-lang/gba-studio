@@ -118,8 +118,9 @@ function computeSpriteBounds(img: HTMLImageElement): SpriteBounds {
 }
 
 const DEFAULT_HITBOX = { left: 0.2, top: 0.0, right: 0.8, bottom: 0.65 };
-function getHitbox(po: PlacedObject) {
-  return po.hitbox ?? DEFAULT_HITBOX;
+type HitboxBounds = { left: number; top: number; right: number; bottom: number };
+function getHitbox(po: PlacedObject, cache: Map<string, HitboxBounds>): HitboxBounds {
+  return cache.get(po.objectId) ?? DEFAULT_HITBOX;
 }
 
 interface SavedMob {
@@ -310,6 +311,7 @@ function isBlocked(grid: string[][] | null, x: number, y: number): boolean {
 function isBlockedByObject(
   objects: PlacedObject[],
   boundsCache: Map<string, SpriteBounds>,
+  hitboxCache: Map<string, HitboxBounds>,
   x: number,
   y: number,
 ): boolean {
@@ -320,7 +322,7 @@ function isBlockedByObject(
   const footB   = y + CHAR_SIZE;
   const footT   = footB - 4;
   for (const po of objects) {
-    const hb = getHitbox(po);
+    const hb = getHitbox(po, hitboxCache);
     const colX = po.x + po.width  * hb.left;
     const colW = po.width  * (hb.right - hb.left);
     const colY = po.y + po.height * hb.top;
@@ -536,6 +538,7 @@ export default function BuilderMode() {
   const draggingObjectRef = useRef<{ id: string; offsetX: number; offsetY: number } | null>(null);
   const objectImgCacheRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const objectBoundsCacheRef = useRef<Map<string, SpriteBounds>>(new Map());
+  const objectHitboxCacheRef = useRef<Map<string, { left: number; top: number; right: number; bottom: number }>>(new Map());
   const editorToolRef = useRef<"door" | "object" | "mob" | "npc" | null>(null);
   const selectedObjectRef = useRef<SavedObject | null>(null);
   const resizingObjectRef = useRef<{ id: string; startMouseX: number; startMouseY: number; startW: number; startH: number } | null>(null);
@@ -600,6 +603,7 @@ export default function BuilderMode() {
   const [activeDialogue, setActiveDialogue] = useState<DialogueState | null>(null);
   const [activeTab, setActiveTab] = useState<SidebarTab>("rooms");
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [showHelp, setShowHelp] = useState(false);
   const [isEditorMode, setIsEditorMode] = useState(false);
   const [editorTool, setEditorTool] = useState<"door" | "object" | "mob" | "npc" | null>(null);
   const [placedDoors, setPlacedDoors] = useState<PlacedDoor[]>([]);
@@ -719,11 +723,15 @@ export default function BuilderMode() {
     if (!user || !projectId) return;
     const db = getFirebaseDb();
     getDocs(collection(db, "users", user.uid, "projects", projectId, "objects")).then((snap) => {
-      const objs: SavedObject[] = snap.docs.map((d) => ({
-        id: d.id,
-        name: (d.data().name as string) ?? "Object",
-        imageBase64: (d.data().imageBase64 as string) ?? "",
-      }));
+      const objs: SavedObject[] = snap.docs.map((d) => {
+        const hitbox = d.data().hitbox as HitboxBounds | undefined;
+        if (hitbox) objectHitboxCacheRef.current.set(d.id, hitbox);
+        return {
+          id: d.id,
+          name: (d.data().name as string) ?? "Object",
+          imageBase64: (d.data().imageBase64 as string) ?? "",
+        };
+      });
       setSavedObjects(objs);
       // Pre-load images into cache
       objs.forEach((obj) => {
@@ -1075,14 +1083,14 @@ export default function BuilderMode() {
       const stepX = Math.sign(dx);
       for (let i = 0; i < Math.abs(dx); i++) {
         const next = Math.max(0, Math.min(CANVAS_W - CHAR_SIZE, newX + stepX));
-        if (!grace && (isBlocked(grid, next, pos.y) || isBlockedByObject(objs, bounds, next, pos.y))) break;
+        if (!grace && (isBlocked(grid, next, pos.y) || isBlockedByObject(objs, bounds, objectHitboxCacheRef.current, next, pos.y))) break;
         newX = next;
       }
       let newY = pos.y;
       const stepY = Math.sign(dy);
       for (let i = 0; i < Math.abs(dy); i++) {
         const next = Math.max(0, Math.min(CANVAS_H - CHAR_SIZE, newY + stepY));
-        if (!grace && (isBlocked(grid, newX, next) || isBlockedByObject(objs, bounds, newX, next))) break;
+        if (!grace && (isBlocked(grid, newX, next) || isBlockedByObject(objs, bounds, objectHitboxCacheRef.current, newX, next))) break;
         newY = next;
       }
       pixelPosRef.current = { x: newX, y: newY };
@@ -1179,7 +1187,7 @@ export default function BuilderMode() {
           ctx.lineWidth = 1;
           ctx.strokeRect(po.x + po.width - 8, po.y + po.height - 8, 8, 8);
           // Hitbox debug overlay (red)
-          const hb = getHitbox(po);
+          const hb = getHitbox(po, objectHitboxCacheRef.current);
           const hx = po.x + po.width  * hb.left;
           const hw = po.width  * (hb.right - hb.left);
           const hy = po.y + po.height * hb.top;
@@ -1459,6 +1467,10 @@ export default function BuilderMode() {
     const roomNPCs = room.placedNPCs ?? [];
     placedNPCsRef.current = roomNPCs;
     setPlacedNPCs(roomNPCs);
+    // Spawn player at center when manually selecting a room
+    pixelPosRef.current = { x: Math.round(CANVAS_W / 2 - CHAR_SIZE / 2), y: Math.round(CANVAS_H / 2 - CHAR_SIZE / 2) };
+    spawnGraceFramesRef.current = 30;
+
     if (!room.imageBase64) {
       roomBgRef.current = null;
       return;
@@ -1517,7 +1529,7 @@ export default function BuilderMode() {
     if (selectedPlacedObjectIdRef.current) {
       const selPO = placedObjectsRef.current.find(p => p.id === selectedPlacedObjectIdRef.current);
       if (selPO) {
-        const hb = getHitbox(selPO);
+        const hb = getHitbox(selPO, objectHitboxCacheRef.current);
         const hx = selPO.x + selPO.width  * hb.left,  hw = selPO.width  * (hb.right - hb.left);
         const hy = selPO.y + selPO.height * hb.top,   hh = selPO.height * (hb.bottom - hb.top);
         const midX = hx + hw / 2, midY = hy + hh / 2;
@@ -1533,7 +1545,7 @@ export default function BuilderMode() {
             draggingHitboxHandleRef.current = {
               poId: selPO.id,
               handle,
-              origHitbox: { ...getHitbox(selPO) },
+              origHitbox: { ...getHitbox(selPO, objectHitboxCacheRef.current) },
               startMouseX: cx,
               startMouseY: cy,
             };
@@ -1712,6 +1724,52 @@ export default function BuilderMode() {
         { placedNPCs: newNPCs }
       ).catch((err) => console.warn("Failed to save placed NPC:", err));
     }
+
+    // ── Select mode: no tool active — hit-test all placed items ──────────────
+    if (editorToolRef.current === null) {
+      // NPCs (topmost render layer)
+      for (const npc of [...placedNPCsRef.current].reverse()) {
+        if (cx >= npc.x && cx <= npc.x + NPC_SIZE && cy >= npc.y && cy <= npc.y + NPC_SIZE) {
+          selectedPlacedObjectIdRef.current = null;
+          setSelectedMobInstanceId(null);
+          selectedMobInstanceIdRef.current = null;
+          setSelectedNPCInstanceId(npc.id);
+          selectedNPCInstanceIdRef.current = npc.id;
+          draggingNPCRef.current = { id: npc.id, offsetX: cx - npc.x, offsetY: cy - npc.y };
+          return;
+        }
+      }
+      // Mobs
+      for (const mob of [...placedMobsRef.current].reverse()) {
+        if (cx >= mob.x && cx <= mob.x + MOB_SIZE && cy >= mob.y && cy <= mob.y + MOB_SIZE) {
+          selectedPlacedObjectIdRef.current = null;
+          setSelectedNPCInstanceId(null);
+          selectedNPCInstanceIdRef.current = null;
+          setSelectedMobInstanceId(mob.id);
+          selectedMobInstanceIdRef.current = mob.id;
+          draggingMobRef.current = { id: mob.id, offsetX: cx - mob.x, offsetY: cy - mob.y };
+          return;
+        }
+      }
+      // Objects
+      for (const po of [...placedObjectsRef.current].reverse()) {
+        if (cx >= po.x && cx <= po.x + po.width && cy >= po.y && cy <= po.y + po.height) {
+          setSelectedMobInstanceId(null);
+          selectedMobInstanceIdRef.current = null;
+          setSelectedNPCInstanceId(null);
+          selectedNPCInstanceIdRef.current = null;
+          selectedPlacedObjectIdRef.current = po.id;
+          draggingObjectRef.current = { id: po.id, offsetX: cx - po.x, offsetY: cy - po.y };
+          return;
+        }
+      }
+      // Empty click — clear all selections
+      selectedPlacedObjectIdRef.current = null;
+      setSelectedMobInstanceId(null);
+      selectedMobInstanceIdRef.current = null;
+      setSelectedNPCInstanceId(null);
+      selectedNPCInstanceIdRef.current = null;
+    }
   }
 
   function handleCanvasMouseMove(e: React.MouseEvent<HTMLCanvasElement>) {
@@ -1730,9 +1788,8 @@ export default function BuilderMode() {
       if (handle.includes('e')) right  = Math.min(1,   Math.max(left   + 0.05, right  + dxF));
       if (handle.includes('n')) top    = Math.max(0,   Math.min(bottom - 0.05, top    + dyF));
       if (handle.includes('s')) bottom = Math.min(1,   Math.max(top    + 0.05, bottom + dyF));
-      const newHitbox = { left, top, right, bottom };
-      setPlacedObjects(prev => prev.map(p => p.id === poId ? { ...p, hitbox: newHitbox } : p));
-      placedObjectsRef.current = placedObjectsRef.current.map(p => p.id === poId ? { ...p, hitbox: newHitbox } : p);
+      // Update the objectId-keyed cache — the game loop reads from here for live preview
+      objectHitboxCacheRef.current.set(po.objectId, { left, top, right, bottom });
       return;
     }
 
@@ -1786,14 +1843,18 @@ export default function BuilderMode() {
 
   async function handleCanvasMouseUp() {
     if (draggingHitboxHandleRef.current) {
+      const { poId } = draggingHitboxHandleRef.current;
       draggingHitboxHandleRef.current = null;
-      const updatedObjects = placedObjectsRef.current;
-      if (currentRoomIdRef.current) {
-        const db = getFirebaseDb();
-        updateDoc(
-          doc(db, "users", user!.uid, "projects", projectId, "rooms", currentRoomIdRef.current),
-          { placedObjects: updatedObjects }
-        ).catch(err => console.warn("Failed to save hitbox:", err));
+      const po = placedObjectsRef.current.find(p => p.id === poId);
+      if (po && user && projectId) {
+        const hitbox = objectHitboxCacheRef.current.get(po.objectId);
+        if (hitbox) {
+          const db = getFirebaseDb();
+          updateDoc(
+            doc(db, "users", user.uid, "projects", projectId, "objects", po.objectId),
+            { hitbox }
+          ).catch(err => console.warn("Failed to save hitbox:", err));
+        }
       }
       return;
     }
@@ -2328,7 +2389,29 @@ export default function BuilderMode() {
           </TabSection>
         </div>
 
-        <div className="border-t border-gray-700 p-3">
+        <div className="border-t border-gray-700 p-3 flex flex-col gap-2">
+          <div className="flex gap-1">
+            <button
+              onClick={() => !isEditorMode && handleToggleEditorMode()}
+              className={`flex-1 rounded px-2 py-1.5 text-xs font-semibold transition-colors ${
+                isEditorMode
+                  ? "bg-blue-600 text-white"
+                  : "bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-white"
+              }`}
+            >
+              Editor Mode
+            </button>
+            <button
+              onClick={() => isEditorMode && handleToggleEditorMode()}
+              className={`flex-1 rounded px-2 py-1.5 text-xs font-semibold transition-colors ${
+                !isEditorMode
+                  ? "bg-blue-600 text-white"
+                  : "bg-gray-700 text-gray-400 hover:bg-gray-600 hover:text-white"
+              }`}
+            >
+              Play Mode
+            </button>
+          </div>
           <button
             onClick={() => router.push(`/project-hub/${projectId}`)}
             className="w-full rounded px-3 py-1.5 text-xs text-gray-400 hover:bg-gray-700 hover:text-white"
@@ -2346,36 +2429,21 @@ export default function BuilderMode() {
             : "flex flex-1 flex-col items-center justify-center overflow-hidden p-4"
         }
       >
-        {/* Editor / Play toggle */}
-        {!isFullscreen && (
-          <div className="mb-2 flex items-center gap-3">
-            <button
-              onClick={handleToggleEditorMode}
-              className={`rounded px-4 py-1 text-xs font-semibold transition-colors ${
-                isEditorMode
-                  ? "bg-yellow-500 text-gray-900 hover:bg-yellow-400"
-                  : "bg-gray-700 text-gray-300 hover:bg-gray-600"
-              }`}
-            >
-              {isEditorMode ? "Editor Mode" : "Play Mode"}
-            </button>
-
-            {isEditorMode && (
-              <span className="text-[10px] text-gray-500">
-                {editingMobPathId
-                  ? "Click to add waypoints — click first point to close loop — Esc to finish"
-                  : editorTool === "door"
-                  ? "Click canvas to place a door — drag to reposition"
-                  : editorTool === "object"
-                  ? "Click to place — drag to reposition — right-click to delete"
-                  : editorTool === "mob"
-                  ? "Click to place mob — drag to reposition — right-click to delete"
-                  : editorTool === "npc"
-                  ? "Click to place NPC — drag to reposition — right-click to delete"
-                  : "Select a tool from Room Editor or click an object/mob/NPC"}
-              </span>
-            )}
-          </div>
+        {/* Editor mode hint */}
+        {!isFullscreen && isEditorMode && (
+          <p className="mb-1 text-center text-[10px] text-gray-500">
+            {editingMobPathId
+              ? "Click to add waypoints — click first point to close loop — Esc to finish"
+              : editorTool === "door"
+              ? "Click canvas to place a door — drag to reposition"
+              : editorTool === "object"
+              ? "Click to place — drag to reposition — right-click to delete"
+              : editorTool === "mob"
+              ? "Click to place mob — drag to reposition — right-click to delete"
+              : editorTool === "npc"
+              ? "Click to place NPC — drag to reposition — right-click to delete"
+              : "Select a tool from Room Editor or click an object/mob/NPC"}
+          </p>
         )}
 
         <div
@@ -2448,6 +2516,59 @@ export default function BuilderMode() {
           {activeDialogue && !isEditorMode && (
             <DialogueBox dialogue={activeDialogue} />
           )}
+
+          {/* Help panel */}
+          <div className="absolute bottom-2 right-2 flex flex-col items-end gap-1">
+            {showHelp && (
+              <div className="mb-1 w-64 rounded-lg bg-gray-900/95 text-xs text-gray-200 shadow-xl ring-1 ring-white/10 overflow-hidden">
+                <div className="border-b border-white/10 px-3 py-2 font-ahsing text-sm text-white">How to use Builder Mode</div>
+                <div className="max-h-64 overflow-y-auto divide-y divide-white/5">
+                  {[
+                    {
+                      title: "Rooms",
+                      body: "Click a room in the sidebar to load it as the background.",
+                    },
+                    {
+                      title: "Doors",
+                      body: "Open Room Editor, select the Door tool, click the canvas to place a door hitbox, then link it to another room.",
+                    },
+                    {
+                      title: "Objects",
+                      body: "Select an object in the sidebar then click the canvas to place it. Click a placed object to select it — drag the blue border to move it, drag the red box corners to resize the hitbox.",
+                    },
+                    {
+                      title: "Characters",
+                      body: "Click a character in the sidebar. Click 'Set Player' to make them the main character who appears in Play Mode.",
+                    },
+                    {
+                      title: "Mobs",
+                      body: "Select a mob in the sidebar then click the canvas to place it. Mobs wander automatically in Play Mode. Select a placed mob to set a patrol path.",
+                    },
+                    {
+                      title: "NPCs",
+                      body: "Select an NPC in the sidebar then click the canvas to place it. Walk up and press Space to talk to them in Play Mode.",
+                    },
+                  ].map(({ title, body }) => (
+                    <div key={title} className="px-3 py-2">
+                      <p className="font-semibold text-white font-ahsing">{title}</p>
+                      <p className="mt-0.5 leading-relaxed text-gray-400">{body}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            <button
+              onClick={() => setShowHelp((v) => !v)}
+              title="Help"
+              className={`flex h-7 w-7 items-center justify-center rounded-full text-sm font-bold shadow-lg transition-colors ${
+                showHelp
+                  ? "bg-white text-gray-900"
+                  : "bg-black/50 text-white hover:bg-black/70"
+              }`}
+            >
+              ?
+            </button>
+          </div>
 
           {/* Fullscreen toggle */}
           <button

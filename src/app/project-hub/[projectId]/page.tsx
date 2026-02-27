@@ -1,21 +1,292 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { collection, getDocs } from "firebase/firestore";
 import { useAuth } from "@/lib/auth-context";
 import { useProject } from "@/lib/project-context";
+import { getFirebaseDb } from "@/lib/firebase";
+
+// ─── Types ────────────────────────────────────────────────────────────────────
+
+interface RoomPreview  { id: string; name: string; imageBase64: string }
+interface CharPreview  { id: string; name: string; layers: { spritesheet: string; zIndex: number }[] }
+interface SpritePreview { id: string; name: string; spritesheet: string }
+interface ThumbPreview  { id: string; name: string; imageBase64: string }
+
+// ─── Cycling image preview (rooms / objects / accessories) ───────────────────
+
+function CyclingImages({ items }: { items: { imageBase64: string }[] }) {
+  const [idx, setIdx] = useState(0);
+  const [fade, setFade] = useState(true);
+  useEffect(() => {
+    if (items.length < 2) return;
+    const t = setInterval(() => {
+      setFade(false);
+      setTimeout(() => {
+        setIdx((i) => (i + 1) % items.length);
+        setFade(true);
+      }, 300);
+    }, 2000);
+    return () => clearInterval(t);
+  }, [items.length]);
+  if (!items.length) return <DefaultPreview />;
+  return (
+    <img
+      src={items[idx]?.imageBase64}
+      alt=""
+      className="h-full w-full object-cover"
+      style={{
+        imageRendering: "pixelated",
+        opacity: fade ? 1 : 0,
+        transition: "opacity 0.3s ease",
+      }}
+    />
+  );
+}
+
+// ─── Spritesheet walk animation (mobs / NPCs) ────────────────────────────────
+
+// Spritesheet layout: 4 cols = frames 0-3, 4 rows = up/right/down/left
+const DIR_ROW = [0, 1, 2, 3]; // cycle through all 4 directions
+
+function SpriteWalkCanvas({ items }: { items: SpritePreview[] }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rafRef    = useRef(0);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !items.length) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.imageSmoothingEnabled = false;
+
+    let itemIdx = 0;
+    let frame   = 0;
+    let dirIdx  = 0;
+    let lastFrameTs  = 0;
+    let lastItemTs   = 0;
+
+    const images: HTMLImageElement[] = items.map((it) => {
+      const img = new Image();
+      img.src = it.spritesheet;
+      return img;
+    });
+
+    function draw(ts: number) {
+      if (!ctx || !canvas) return;
+      if (ts - lastFrameTs >= 150) {
+        frame = (frame + 1) % 4;
+        lastFrameTs = ts;
+      }
+      // Cycle direction every 600ms
+      if (ts - lastItemTs >= 2400) {
+        itemIdx = (itemIdx + 1) % images.length;
+        dirIdx  = 0;
+        lastItemTs = ts;
+      } else if (ts - lastItemTs >= 1800) {
+        dirIdx = 3;
+      } else if (ts - lastItemTs >= 1200) {
+        dirIdx = 2;
+      } else if (ts - lastItemTs >= 600) {
+        dirIdx = 1;
+      }
+
+      const img = images[itemIdx];
+      if (!img.complete || img.naturalWidth === 0) { rafRef.current = requestAnimationFrame(draw); return; }
+
+      const fw = img.naturalWidth  / 4;
+      const fh = img.naturalHeight / 4;
+      const row = DIR_ROW[dirIdx];
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(img, frame * fw, row * fh, fw, fh, 0, 0, canvas.width, canvas.height);
+
+      // Name label
+      if (items[itemIdx]?.name) {
+        ctx.font = "bold 9px 'Ahsing', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillStyle = "rgba(0,0,0,0.55)";
+        ctx.fillRect(0, canvas.height - 14, canvas.width, 14);
+        ctx.fillStyle = "#fff";
+        ctx.fillText(items[itemIdx].name, canvas.width / 2, canvas.height - 3);
+      }
+
+      rafRef.current = requestAnimationFrame(draw);
+    }
+    rafRef.current = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [items]);
+
+  if (!items.length) return <DefaultPreview />;
+  return <canvas ref={canvasRef} width={80} height={80} className="h-full w-full" style={{ imageRendering: "pixelated" }} />;
+}
+
+// ─── Layered character walk animation ────────────────────────────────────────
+
+function CharWalkCanvas({ items }: { items: CharPreview[] }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const rafRef    = useRef(0);
+
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !items.length) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.imageSmoothingEnabled = false;
+
+    // Pre-load all layer images for all characters
+    type LayerImg = { img: HTMLImageElement; zIndex: number };
+    const charLayers: LayerImg[][] = items.map((ch) =>
+      [...ch.layers]
+        .sort((a, b) => a.zIndex - b.zIndex)
+        .map((l) => { const img = new Image(); img.src = l.spritesheet; return { img, zIndex: l.zIndex }; })
+    );
+
+    let itemIdx   = 0;
+    let frame     = 0;
+    let dirIdx    = 0;
+    let lastFrameTs = 0;
+    let lastItemTs  = 0;
+
+    function draw(ts: number) {
+      if (!ctx || !canvas) return;
+      if (ts - lastFrameTs >= 150) {
+        frame = (frame + 1) % 4;
+        lastFrameTs = ts;
+      }
+      if (ts - lastItemTs >= 2400) {
+        itemIdx = (itemIdx + 1) % items.length;
+        dirIdx  = 0;
+        lastItemTs = ts;
+      } else if (ts - lastItemTs >= 1800) {
+        dirIdx = 3;
+      } else if (ts - lastItemTs >= 1200) {
+        dirIdx = 2;
+      } else if (ts - lastItemTs >= 600) {
+        dirIdx = 1;
+      }
+
+      const layers = charLayers[itemIdx] ?? [];
+      const row = DIR_ROW[dirIdx];
+
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      for (const { img } of layers) {
+        if (!img.complete || img.naturalWidth === 0) continue;
+        const fw = img.naturalWidth  / 4;
+        const fh = img.naturalHeight / 4;
+        ctx.drawImage(img, frame * fw, row * fh, fw, fh, 0, 0, canvas.width, canvas.height);
+      }
+
+      // Name label
+      const name = items[itemIdx]?.name;
+      if (name) {
+        ctx.font = "bold 9px 'Ahsing', sans-serif";
+        ctx.textAlign = "center";
+        ctx.fillStyle = "rgba(0,0,0,0.55)";
+        ctx.fillRect(0, canvas.height - 14, canvas.width, 14);
+        ctx.fillStyle = "#fff";
+        ctx.fillText(name, canvas.width / 2, canvas.height - 3);
+      }
+
+      rafRef.current = requestAnimationFrame(draw);
+    }
+    rafRef.current = requestAnimationFrame(draw);
+    return () => cancelAnimationFrame(rafRef.current);
+  }, [items]);
+
+  if (!items.length) return <DefaultPreview />;
+  return <canvas ref={canvasRef} width={80} height={80} className="h-full w-full" style={{ imageRendering: "pixelated" }} />;
+}
+
+// ─── Fallback placeholder ─────────────────────────────────────────────────────
+
+function DefaultPreview() {
+  return (
+    <div className="flex h-full w-full items-center justify-center">
+      <span className="text-3xl opacity-20">+</span>
+    </div>
+  );
+}
+
+// ─── Card wrapper ─────────────────────────────────────────────────────────────
+
+function HubCard({
+  href, label, description, preview,
+}: {
+  href: string;
+  label: string;
+  description: string;
+  preview: React.ReactNode;
+}) {
+  return (
+    <Link
+      href={href}
+      className="flex flex-col rounded-xl border-2 border-gray-200 bg-white overflow-hidden transition-all hover:border-accent hover:shadow-lg hover:shadow-blue-100"
+    >
+      <div className="h-32 w-full bg-gray-100 overflow-hidden">
+        {preview}
+      </div>
+      <div className="p-4">
+        <span className="block text-lg font-ahsing text-foreground">{label}</span>
+        <span className="mt-0.5 block text-sm text-gray-500">{description}</span>
+      </div>
+    </Link>
+  );
+}
+
+// ─── Page ─────────────────────────────────────────────────────────────────────
 
 export default function HubMenu() {
   const { user, loading } = useAuth();
   const { projectId, projectName, loading: projectLoading } = useProject();
   const router = useRouter();
 
+  const [rooms,       setRooms]       = useState<RoomPreview[]>([]);
+  const [characters,  setCharacters]  = useState<CharPreview[]>([]);
+  const [objects,     setObjects]     = useState<ThumbPreview[]>([]);
+  const [mobs,        setMobs]        = useState<SpritePreview[]>([]);
+  const [npcs,        setNpcs]        = useState<SpritePreview[]>([]);
+  const [accessories, setAccessories] = useState<ThumbPreview[]>([]);
+
   useEffect(() => {
-    if (!loading && !user) {
-      router.replace("/login");
-    }
+    if (!loading && !user) router.replace("/login");
   }, [loading, user, router]);
+
+  useEffect(() => {
+    if (!user || !projectId) return;
+    const db = getFirebaseDb();
+    const base = `users/${user.uid}/projects/${projectId}`;
+
+    getDocs(collection(db, base, "rooms")).then((snap) =>
+      setRooms(snap.docs.map((d) => ({ id: d.id, name: d.data().name ?? "Room", imageBase64: d.data().imageBase64 ?? "" })).filter((r) => r.imageBase64))
+    );
+
+    getDocs(collection(db, base, "characters")).then((snap) =>
+      setCharacters(snap.docs.map((d) => ({
+        id: d.id,
+        name: d.data().name ?? "Character",
+        layers: (d.data().layers as { spritesheet: string; zIndex: number }[] | undefined) ?? [],
+      })).filter((c) => c.layers.length > 0))
+    );
+
+    getDocs(collection(db, base, "objects")).then((snap) =>
+      setObjects(snap.docs.map((d) => ({ id: d.id, name: d.data().name ?? "Object", imageBase64: d.data().imageBase64 ?? "" })).filter((o) => o.imageBase64))
+    );
+
+    getDocs(collection(db, base, "mobs")).then((snap) =>
+      setMobs(snap.docs.map((d) => ({ id: d.id, name: d.data().name ?? "Mob", spritesheet: d.data().spritesheet ?? "" })).filter((m) => m.spritesheet))
+    );
+
+    getDocs(collection(db, base, "npcs")).then((snap) =>
+      setNpcs(snap.docs.map((d) => ({ id: d.id, name: d.data().name ?? "NPC", spritesheet: d.data().spritesheet ?? "" })).filter((n) => n.spritesheet))
+    );
+
+    getDocs(collection(db, base, "accessories")).then((snap) =>
+      setAccessories(snap.docs.map((d) => ({ id: d.id, name: d.data().name ?? "Accessory", imageBase64: d.data().imageBase64 ?? "" })).filter((a) => a.imageBase64))
+    );
+  }, [user, projectId]);
 
   if (loading || projectLoading || !user) {
     return (
@@ -26,193 +297,66 @@ export default function HubMenu() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col items-center justify-center px-4">
-      <img src='/logo.png' alt='GBA Studio' style={{ height: '120px' }} />
-      <p className="mt-4 text-2xl text-foreground font-ahsing">{projectName}</p>
+    <div className="flex min-h-screen flex-col items-center px-4 py-10">
+      <img src="/logo.png" alt="GBA Studio" style={{ height: "100px" }} />
+      <p className="mt-3 text-2xl text-foreground font-ahsing">{projectName}</p>
 
-      <div className="mt-10 grid w-full max-w-[700px] grid-cols-3 gap-6">
-        {/* Build Room */}
-        <Link
+      <div className="mt-8 grid w-full max-w-[720px] grid-cols-3 gap-5">
+        <HubCard
           href={`/project-hub/${projectId}/rooms`}
-          className="flex flex-col items-center rounded-xl border-2 border-gray-200 bg-white p-6 transition-all hover:border-accent hover:shadow-lg hover:shadow-blue-100"
-        >
-          <svg
-            width="48"
-            height="48"
-            viewBox="0 0 48 48"
-            fill="none"
-            className="mb-4 text-accent"
-          >
-            <rect x="4" y="4" width="9" height="9" rx="1" fill="currentColor" opacity="0.6" />
-            <rect x="15" y="4" width="9" height="9" rx="1" fill="currentColor" opacity="0.8" />
-            <rect x="26" y="4" width="9" height="9" rx="1" fill="currentColor" opacity="0.6" />
-            <rect x="37" y="4" width="7" height="9" rx="1" fill="currentColor" opacity="0.4" />
-            <rect x="4" y="15" width="9" height="9" rx="1" fill="currentColor" opacity="0.8" />
-            <rect x="15" y="15" width="9" height="9" rx="1" fill="currentColor" />
-            <rect x="26" y="15" width="9" height="9" rx="1" fill="currentColor" opacity="0.8" />
-            <rect x="37" y="15" width="7" height="9" rx="1" fill="currentColor" opacity="0.6" />
-            <rect x="4" y="26" width="9" height="9" rx="1" fill="currentColor" opacity="0.6" />
-            <rect x="15" y="26" width="9" height="9" rx="1" fill="currentColor" opacity="0.8" />
-            <rect x="26" y="26" width="9" height="9" rx="1" fill="currentColor" opacity="0.6" />
-            <rect x="37" y="26" width="7" height="9" rx="1" fill="currentColor" opacity="0.4" />
-            <rect x="4" y="37" width="9" height="7" rx="1" fill="currentColor" opacity="0.4" />
-            <rect x="15" y="37" width="9" height="7" rx="1" fill="currentColor" opacity="0.6" />
-            <rect x="26" y="37" width="9" height="7" rx="1" fill="currentColor" opacity="0.4" />
-            <rect x="37" y="37" width="7" height="7" rx="1" fill="currentColor" opacity="0.3" />
-          </svg>
-          <span className="text-lg font-ahsing text-foreground">Build Room</span>
-          <span className="mt-1 text-center text-sm text-gray-500">
-            Design your world tile by tile
-          </span>
-        </Link>
-
-        {/* Objects */}
-        <Link
-          href={`/project-hub/${projectId}/objects`}
-          className="flex flex-col items-center rounded-xl border-2 border-gray-200 bg-white p-6 transition-all hover:border-accent hover:shadow-lg hover:shadow-blue-100"
-        >
-          <svg
-            width="48"
-            height="48"
-            viewBox="0 0 48 48"
-            fill="none"
-            className="mb-4 text-accent"
-          >
-            <rect x="10" y="28" width="28" height="14" rx="2" fill="currentColor" opacity="0.5" />
-            <rect x="14" y="20" width="20" height="12" rx="2" fill="currentColor" opacity="0.75" />
-            <rect x="18" y="10" width="12" height="12" rx="2" fill="currentColor" />
-            <rect x="20" y="6" width="8" height="6" rx="1" fill="currentColor" opacity="0.6" />
-          </svg>
-          <span className="text-lg font-ahsing text-foreground">Objects</span>
-          <span className="mt-1 text-center text-sm text-gray-500">
-            Generate chests, altars & props
-          </span>
-        </Link>
-
-        {/* Build Character */}
-        <Link
+          label="Build Room"
+          description="Design your world tile by tile"
+          preview={<CyclingImages items={rooms} />}
+        />
+        <HubCard
           href={`/project-hub/${projectId}/characters`}
-          className="flex flex-col items-center rounded-xl border-2 border-gray-200 bg-white p-6 transition-all hover:border-accent hover:shadow-lg hover:shadow-blue-100"
-        >
-          <svg
-            width="48"
-            height="48"
-            viewBox="0 0 48 48"
-            fill="none"
-            className="mb-4 text-accent"
-          >
-            <rect x="16" y="4" width="16" height="14" rx="3" fill="currentColor" />
-            <rect x="14" y="20" width="20" height="14" rx="2" fill="currentColor" opacity="0.8" />
-            <rect x="6" y="20" width="6" height="12" rx="2" fill="currentColor" opacity="0.6" />
-            <rect x="36" y="20" width="6" height="12" rx="2" fill="currentColor" opacity="0.6" />
-            <rect x="16" y="36" width="6" height="8" rx="2" fill="currentColor" opacity="0.7" />
-            <rect x="26" y="36" width="6" height="8" rx="2" fill="currentColor" opacity="0.7" />
-          </svg>
-          <span className="text-lg font-ahsing text-foreground">Build Character</span>
-          <span className="mt-1 text-center text-sm text-gray-500">
-            Draw your hero pixel by pixel
-          </span>
-        </Link>
-
-        {/* Accessories */}
-        <Link
-          href={`/project-hub/${projectId}/accessories`}
-          className="flex flex-col items-center rounded-xl border-2 border-gray-200 bg-white p-6 transition-all hover:border-accent hover:shadow-lg hover:shadow-blue-100"
-        >
-          <svg
-            width="48"
-            height="48"
-            viewBox="0 0 48 48"
-            fill="none"
-            className="mb-4 text-accent"
-          >
-            <path d="M24 4L28 16H40L30 24L34 36L24 28L14 36L18 24L8 16H20L24 4Z" fill="currentColor" opacity="0.8" />
-          </svg>
-          <span className="text-lg font-ahsing text-foreground">Accessories</span>
-          <span className="mt-1 text-center text-sm text-gray-500">
-            Generate capes, hats & weapons
-          </span>
-        </Link>
-
-        {/* Mobs */}
-        <Link
+          label="Build Character"
+          description="Draw your hero pixel by pixel"
+          preview={<CharWalkCanvas items={characters} />}
+        />
+        <HubCard
+          href={`/project-hub/${projectId}/objects`}
+          label="Objects"
+          description="Generate chests, altars & props"
+          preview={<CyclingImages items={objects} />}
+        />
+        <HubCard
           href={`/project-hub/${projectId}/mobs`}
-          className="flex flex-col items-center rounded-xl border-2 border-gray-200 bg-white p-6 transition-all hover:border-accent hover:shadow-lg hover:shadow-blue-100"
-        >
-          <svg
-            width="48"
-            height="48"
-            viewBox="0 0 48 48"
-            fill="none"
-            className="mb-4 text-accent"
-          >
-            <ellipse cx="24" cy="28" rx="14" ry="10" fill="currentColor" opacity="0.5" />
-            <ellipse cx="24" cy="22" rx="10" ry="10" fill="currentColor" opacity="0.8" />
-            <rect x="18" y="14" width="4" height="6" rx="2" fill="currentColor" />
-            <rect x="26" y="14" width="4" height="6" rx="2" fill="currentColor" />
-            <circle cx="20" cy="21" r="2" fill="white" />
-            <circle cx="28" cy="21" r="2" fill="white" />
-          </svg>
-          <span className="text-lg font-ahsing text-foreground">Mobs</span>
-          <span className="mt-1 text-center text-sm text-gray-500">
-            Generate enemies & creatures
-          </span>
-        </Link>
-
-        {/* NPCs */}
-        <Link
+          label="Mobs"
+          description="Generate enemies & creatures"
+          preview={<SpriteWalkCanvas items={mobs} />}
+        />
+        <HubCard
           href={`/project-hub/${projectId}/npcs`}
-          className="flex flex-col items-center rounded-xl border-2 border-gray-200 bg-white p-6 transition-all hover:border-accent hover:shadow-lg hover:shadow-blue-100"
-        >
-          <svg
-            width="48"
-            height="48"
-            viewBox="0 0 48 48"
-            fill="none"
-            className="mb-4 text-accent"
-          >
-            <rect x="16" y="4" width="16" height="14" rx="3" fill="currentColor" />
-            <rect x="14" y="20" width="20" height="14" rx="2" fill="currentColor" opacity="0.8" />
-            <rect x="6" y="20" width="6" height="12" rx="2" fill="currentColor" opacity="0.6" />
-            <rect x="36" y="20" width="6" height="12" rx="2" fill="currentColor" opacity="0.6" />
-            <rect x="16" y="36" width="6" height="8" rx="2" fill="currentColor" opacity="0.7" />
-            <rect x="26" y="36" width="6" height="8" rx="2" fill="currentColor" opacity="0.7" />
-            <rect x="28" y="8" width="14" height="10" rx="2" fill="white" stroke="currentColor" strokeWidth="1.5" />
-            <rect x="30" y="11" width="10" height="1.5" rx="0.75" fill="currentColor" opacity="0.6" />
-            <rect x="30" y="14" width="7" height="1.5" rx="0.75" fill="currentColor" opacity="0.6" />
-            <polygon points="30,18 34,21 34,18" fill="white" stroke="currentColor" strokeWidth="1" />
-          </svg>
-          <span className="text-lg font-ahsing text-foreground">NPCs</span>
-          <span className="mt-1 text-center text-sm text-gray-500">
-            Create villagers & dialogue
-          </span>
-        </Link>
+          label="NPCs"
+          description="Create villagers & dialogue"
+          preview={<SpriteWalkCanvas items={npcs} />}
+        />
+        <HubCard
+          href={`/project-hub/${projectId}/accessories`}
+          label="Accessories"
+          description="Generate capes, hats & weapons"
+          preview={<CyclingImages items={accessories} />}
+        />
+      </div>
 
-        {/* Builder Mode */}
+      {/* Builder Mode — full-width prominent button */}
+      <div className="mt-5 w-full max-w-[720px]">
         <Link
           href={`/project-hub/${projectId}/builder-mode`}
-          className="flex flex-col items-center rounded-xl border-2 border-gray-200 bg-white p-6 transition-all hover:border-accent hover:shadow-lg hover:shadow-blue-100"
+          className="flex w-full items-center justify-center gap-3 rounded-xl border-2 border-accent bg-accent/10 px-8 py-5 text-accent transition-all hover:bg-accent hover:text-white hover:shadow-lg hover:shadow-blue-200"
         >
-          <svg
-            width="48"
-            height="48"
-            viewBox="0 0 48 48"
-            fill="none"
-            className="mb-4 text-accent"
-          >
-            <polygon points="16,8 40,24 16,40" fill="currentColor" />
+          <svg width="28" height="28" viewBox="0 0 48 48" fill="none">
+            <polygon points="10,8 42,24 10,40" fill="currentColor" />
           </svg>
-          <span className="text-lg font-ahsing text-foreground">Builder Mode</span>
-          <span className="mt-1 text-center text-sm text-gray-500">
-            Playtest your game world
-          </span>
+          <div className="text-left">
+            <span className="block text-xl font-ahsing">Builder Mode</span>
+            <span className="block text-sm opacity-70">Place rooms, objects, NPCs and playtest your world</span>
+          </div>
         </Link>
       </div>
 
-      <Link
-        href="/"
-        className="mt-10 text-sm text-gray-500 hover:text-foreground"
-      >
+      <Link href="/" className="mt-8 text-sm text-gray-500 hover:text-foreground">
         &larr; Back to Projects
       </Link>
     </div>
