@@ -172,6 +172,7 @@ interface PlacedNPC {
   name: string;
   x: number;
   y: number;
+  patrolPath?: { x: number; y: number }[];
 }
 
 interface NPCState {
@@ -185,6 +186,7 @@ interface NPCState {
   wanderDx: number;
   wanderDy: number;
   wanderFrames: number;
+  waypointIndex: number;
 }
 
 interface DialogueState {
@@ -439,28 +441,53 @@ function updateMobState(state: MobState, mob: PlacedMob, ts: number): MobState {
 }
 
 function updateNPCState(state: NPCState, npc: PlacedNPC, ts: number): NPCState {
-  let { x, y, dir, frame, lastAnimTick, idleCounter, idleFrame, wanderDx, wanderDy, wanderFrames } = state;
+  let { x, y, dir, frame, lastAnimTick, idleCounter, idleFrame, wanderDx, wanderDy, wanderFrames, waypointIndex } = state;
 
   if (npc.isWalking) {
     let moving = false;
-    if (wanderFrames <= 0) {
-      const angle = Math.random() * Math.PI * 2;
-      wanderDx = Math.cos(angle);
-      wanderDy = Math.sin(angle);
-      wanderFrames = 80 + Math.floor(Math.random() * 80);
+    const path = npc.patrolPath;
+
+    if (path && path.length >= 2) {
+      // Follow patrol path
+      const target = path[waypointIndex % path.length];
+      const dx = target.x - x;
+      const dy = target.y - y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < MOB_SPEED + 1) {
+        waypointIndex = (waypointIndex + 1) % path.length;
+      } else {
+        const nx = x + (dx / dist) * MOB_SPEED;
+        const ny = y + (dy / dist) * MOB_SPEED;
+        if (nx >= 0 && nx <= CANVAS_W - NPC_SIZE) { x = nx; moving = true; }
+        if (ny >= 0 && ny <= CANVAS_H - NPC_SIZE) { y = ny; moving = true; }
+        if (moving) {
+          dir = Math.abs(dx) > Math.abs(dy)
+            ? (dx > 0 ? "right" : "left")
+            : (dy > 0 ? "down" : "up");
+        }
+      }
+    } else {
+      // Random wander
+      if (wanderFrames <= 0) {
+        const angle = Math.random() * Math.PI * 2;
+        wanderDx = Math.cos(angle);
+        wanderDy = Math.sin(angle);
+        wanderFrames = 80 + Math.floor(Math.random() * 80);
+      }
+      wanderFrames--;
+      const nx = x + wanderDx * MOB_SPEED;
+      const ny = y + wanderDy * MOB_SPEED;
+      if (nx >= 0 && nx <= CANVAS_W - NPC_SIZE) { x = nx; moving = true; }
+      else { wanderDx = -wanderDx; wanderFrames = 0; }
+      if (ny >= 0 && ny <= CANVAS_H - NPC_SIZE) { y = ny; moving = true; }
+      else { wanderDy = -wanderDy; wanderFrames = 0; }
+      if (moving) {
+        dir = Math.abs(wanderDx) > Math.abs(wanderDy)
+          ? (wanderDx > 0 ? "right" : "left")
+          : (wanderDy > 0 ? "down" : "up");
+      }
     }
-    wanderFrames--;
-    const nx = x + wanderDx * MOB_SPEED;
-    const ny = y + wanderDy * MOB_SPEED;
-    if (nx >= 0 && nx <= CANVAS_W - NPC_SIZE) { x = nx; moving = true; }
-    else { wanderDx = -wanderDx; wanderFrames = 0; }
-    if (ny >= 0 && ny <= CANVAS_H - NPC_SIZE) { y = ny; moving = true; }
-    else { wanderDy = -wanderDy; wanderFrames = 0; }
-    if (moving) {
-      dir = Math.abs(wanderDx) > Math.abs(wanderDy)
-        ? (wanderDx > 0 ? "right" : "left")
-        : (wanderDy > 0 ? "down" : "up");
-    }
+
     if (moving && ts - lastAnimTick >= ANIM_INTERVAL) {
       frame = (frame + 1) % 4;
       lastAnimTick = ts;
@@ -477,7 +504,7 @@ function updateNPCState(state: NPCState, npc: PlacedNPC, ts: number): NPCState {
     frame = idleFrame;
   }
 
-  return { x, y, dir, frame, lastAnimTick, idleCounter, idleFrame, wanderDx, wanderDy, wanderFrames };
+  return { x, y, dir, frame, lastAnimTick, idleCounter, idleFrame, wanderDx, wanderDy, wanderFrames, waypointIndex };
 }
 
 function drawCheckerboard(ctx: CanvasRenderingContext2D) {
@@ -567,6 +594,7 @@ export default function BuilderMode() {
   const npcFrameCacheRef = useRef<Map<string, HTMLCanvasElement[][]>>(new Map());
   const selectedNPCSourceRef = useRef<SavedNPC | null>(null);
   const selectedNPCInstanceIdRef = useRef<string | null>(null);
+  const editingNPCPathIdRef = useRef<string | null>(null);
   const activeDialogueRef = useRef<DialogueState | null>(null);
   const npcLineIndexRef = useRef<Map<string, number>>(new Map());
   const npcPromptAlphaRef = useRef<Map<string, number>>(new Map());
@@ -600,6 +628,7 @@ export default function BuilderMode() {
   const [selectedNPCSourceId, setSelectedNPCSourceId] = useState<string | null>(null);
   const [placedNPCs, setPlacedNPCs] = useState<PlacedNPC[]>([]);
   const [selectedNPCInstanceId, setSelectedNPCInstanceId] = useState<string | null>(null);
+  const [editingNPCPathId, setEditingNPCPathId] = useState<string | null>(null);
   const [activeDialogue, setActiveDialogue] = useState<DialogueState | null>(null);
   const [activeTab, setActiveTab] = useState<SidebarTab>("rooms");
   const [isFullscreen, setIsFullscreen] = useState(false);
@@ -622,6 +651,7 @@ export default function BuilderMode() {
   selectedObjectRef.current = savedObjects.find((o) => o.id === selectedObjectId) ?? null;
   selectedMobSourceRef.current = savedMobs.find((m) => m.id === selectedMobSourceId) ?? null;
   editingMobPathIdRef.current = editingMobPathId;
+  editingNPCPathIdRef.current = editingNPCPathId;
   selectedMobInstanceIdRef.current = selectedMobInstanceId;
   placedNPCsRef.current = placedNPCs;
   selectedNPCSourceRef.current = savedNPCs.find((n) => n.id === selectedNPCSourceId) ?? null;
@@ -809,6 +839,7 @@ export default function BuilderMode() {
           wanderDx: Math.random() > 0.5 ? MOB_SPEED : -MOB_SPEED,
           wanderDy: 0,
           wanderFrames: 80 + Math.floor(Math.random() * 80),
+          waypointIndex: 0,
         });
       }
     }
@@ -1295,6 +1326,34 @@ export default function BuilderMode() {
           ctx.strokeStyle = isSelected ? "#A78BFA" : "#10B981";
           ctx.lineWidth = isSelected ? 2 : 1;
           ctx.strokeRect(npc.x, npc.y, NPC_SIZE, NPC_SIZE);
+          // Draw patrol path for walking NPCs
+          const path = npc.patrolPath;
+          if (npc.isWalking && path && path.length > 0) {
+            ctx.strokeStyle = "#A78BFA";
+            ctx.fillStyle = "#A78BFA";
+            ctx.lineWidth = 1;
+            ctx.setLineDash([3, 3]);
+            ctx.beginPath();
+            path.forEach((wp, i) => {
+              if (i === 0) ctx.moveTo(wp.x, wp.y);
+              else ctx.lineTo(wp.x, wp.y);
+            });
+            if (path.length > 2) ctx.closePath();
+            ctx.stroke();
+            ctx.setLineDash([]);
+            path.forEach((wp) => {
+              ctx.beginPath();
+              ctx.arc(wp.x, wp.y, 4, 0, Math.PI * 2);
+              ctx.fill();
+            });
+            if (editingNPCPathIdRef.current === npc.id && path.length > 0) {
+              ctx.strokeStyle = "#10B981";
+              ctx.lineWidth = 2;
+              ctx.beginPath();
+              ctx.arc(path[0].x, path[0].y, 7, 0, Math.PI * 2);
+              ctx.stroke();
+            }
+          }
         } else if (npc.dialogue.length > 0) {
           const state = npcStatesRef.current.get(npc.id);
           const npcCx = (state?.x ?? npc.x) + NPC_SIZE / 2;
@@ -1430,9 +1489,11 @@ export default function BuilderMode() {
         }
         return;
       }
-      if (e.key === "Escape" && editingMobPathIdRef.current) {
+      if (e.key === "Escape" && (editingMobPathIdRef.current || editingNPCPathIdRef.current)) {
         setEditingMobPathId(null);
         editingMobPathIdRef.current = null;
+        setEditingNPCPathId(null);
+        editingNPCPathIdRef.current = null;
         return;
       }
       keysHeldRef.current.add(e.key);
@@ -1498,6 +1559,8 @@ export default function BuilderMode() {
       setSelectedMobSourceId(null);
       setSelectedMobInstanceId(null);
       setEditingMobPathId(null);
+      setEditingNPCPathId(null);
+      editingNPCPathIdRef.current = null;
       setSelectedNPCSourceId(null);
       setSelectedNPCInstanceId(null);
       setPendingDoor(null);
@@ -1563,6 +1626,29 @@ export default function BuilderMode() {
         resizingObjectRef.current = { id: po.id, startMouseX: cx, startMouseY: cy, startW: po.width, startH: po.height };
         return;
       }
+    }
+
+    // NPC path editing mode
+    if (editingNPCPathIdRef.current) {
+      const npcId = editingNPCPathIdRef.current;
+      const targetNPC = placedNPCsRef.current.find((n) => n.id === npcId);
+      if (targetNPC) {
+        const path = targetNPC.patrolPath ?? [];
+        let closed = false;
+        if (path.length >= 3) {
+          const first = path[0];
+          const dist = Math.sqrt((cx - first.x) ** 2 + (cy - first.y) ** 2);
+          if (dist <= 16) {
+            setEditingNPCPathId(null);
+            editingNPCPathIdRef.current = null;
+            closed = true;
+          }
+        }
+        if (!closed) {
+          void handleUpdateNPCPath(npcId, [...path, { x: Math.round(cx), y: Math.round(cy) }]);
+        }
+      }
+      return;
     }
 
     // Path editing mode — add waypoint (highest priority after resize)
@@ -2081,6 +2167,23 @@ export default function BuilderMode() {
     ).catch((err) => console.warn("Failed to save mob path:", err));
   }
 
+  async function handleUpdateNPCPath(npcId: string, newPath: { x: number; y: number }[]) {
+    if (!user || !currentRoomIdRef.current) return;
+    const newNPCs = placedNPCsRef.current.map((n) =>
+      n.id === npcId ? { ...n, patrolPath: newPath } : n
+    );
+    placedNPCsRef.current = newNPCs;
+    setPlacedNPCs(newNPCs);
+    setSavedRooms((prev) =>
+      prev.map((r) => r.id === currentRoomIdRef.current ? { ...r, placedNPCs: newNPCs } : r)
+    );
+    const db = getFirebaseDb();
+    await updateDoc(
+      doc(db, "users", user.uid, "projects", projectId, "rooms", currentRoomIdRef.current),
+      { placedNPCs: newNPCs }
+    ).catch((err) => console.warn("Failed to save NPC path:", err));
+  }
+
   function toggleTab(tab: SidebarTab) {
     setActiveTab((prev) => (prev === tab ? null : tab));
   }
@@ -2512,6 +2615,36 @@ export default function BuilderMode() {
             </div>
           )}
 
+          {/* Edit NPC Patrol Path button — shown when a walking NPC instance is selected */}
+          {isEditorMode && selectedNPCInstanceId && placedNPCs.find((n) => n.id === selectedNPCInstanceId)?.isWalking && (
+            <div className="absolute bottom-2 left-1/2 -translate-x-1/2 flex gap-2">
+              <button
+                onClick={() => {
+                  if (editingNPCPathId === selectedNPCInstanceId) {
+                    setEditingNPCPathId(null);
+                    editingNPCPathIdRef.current = null;
+                  } else {
+                    setEditingNPCPathId(selectedNPCInstanceId);
+                    editingNPCPathIdRef.current = selectedNPCInstanceId;
+                  }
+                }}
+                className={`rounded-lg px-3 py-1 text-xs font-semibold shadow-lg transition-colors ${
+                  editingNPCPathId === selectedNPCInstanceId
+                    ? "bg-yellow-500 text-gray-900 hover:bg-yellow-400"
+                    : "bg-gray-800/90 text-white hover:bg-gray-700"
+                }`}
+              >
+                {editingNPCPathId === selectedNPCInstanceId ? "Done (Esc)" : "Edit Path"}
+              </button>
+              <button
+                onClick={() => void handleUpdateNPCPath(selectedNPCInstanceId, [])}
+                className="rounded-lg bg-gray-800/90 px-3 py-1 text-xs text-gray-300 hover:bg-gray-700 shadow-lg"
+              >
+                Clear Path
+              </button>
+            </div>
+          )}
+
           {/* Dialogue box overlay */}
           {activeDialogue && !isEditorMode && (
             <DialogueBox dialogue={activeDialogue} />
@@ -2674,68 +2807,64 @@ function MobThumb({ spritesheet }: { spritesheet: string }) {
 // ─── DialogueBox ──────────────────────────────────────────────────────────────
 
 function DialogueBox({ dialogue }: { dialogue: DialogueState }) {
-  const { npcName, lines, style } = dialogue;
+  const { npcName, lines } = dialogue;
   const text = lines[0] ?? "";
-  const hint = "Space ✕";
 
-  if (style === "rpg_banner") return (
-    <div className="pointer-events-none absolute bottom-0 left-0 right-0 border-t-2 border-yellow-700 bg-black/95">
-      <div className="flex items-center gap-3 px-5 py-3">
-        <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded border border-gray-600 bg-gray-800 text-lg font-ahsing text-gray-300">
-          {npcName.charAt(0)}
-        </div>
-        <div className="flex-1">
-          <p className="mb-1 font-ahsing text-xs text-yellow-400">{npcName}</p>
-          <p className="text-sm leading-snug text-white">{text}</p>
-        </div>
-        <span className="text-[10px] text-gray-500">{hint}</span>
-      </div>
-    </div>
-  );
-
-  if (style === "speech_bubble") return (
-    <div className="pointer-events-none absolute bottom-10 left-1/2 -translate-x-1/2">
-      <div className="relative rounded-2xl border-2 border-gray-200 bg-white px-5 py-3 shadow-xl" style={{ minWidth: 200, maxWidth: 320 }}>
-        <p className="mb-1 font-ahsing text-xs text-blue-600">{npcName}</p>
-        <p className="text-sm text-gray-800">{text}</p>
-        <p className="mt-1 text-right text-[10px] text-gray-400">{hint}</p>
-        <div className="absolute -bottom-3 left-8 h-0 w-0"
-          style={{ borderLeft: "6px solid transparent", borderRight: "6px solid transparent", borderTop: "12px solid white" }} />
-      </div>
-    </div>
-  );
-
-  if (style === "parchment") return (
-    <div className="pointer-events-none absolute bottom-0 left-0 right-0">
-      <div className="mx-6 h-3 rounded-t-[60%] bg-amber-400" />
-      <div className="border-x border-amber-400 bg-amber-50 px-8 py-4">
-        <p className="mb-2 text-center font-ahsing text-xs uppercase tracking-widest text-amber-800">{npcName}</p>
-        <p className="text-center text-sm italic text-amber-900">{text}</p>
-        <p className="mt-2 text-center text-[10px] text-amber-600">{hint}</p>
-      </div>
-    </div>
-  );
-
-  if (style === "typewriter") return (
-    <div className="pointer-events-none absolute bottom-0 left-0 right-0 border-t border-green-500/30 bg-gray-950 px-6 py-4 font-mono">
-      <p className="mb-1 text-xs text-green-500/60">{npcName.toUpperCase()}&gt;</p>
-      <p className="text-sm text-green-400">{text}<span className="animate-pulse">▌</span></p>
-      <p className="mt-2 text-[10px] text-green-500/40">[ SPACE ] close</p>
-    </div>
-  );
-
-  // chat_box
   return (
-    <div className="pointer-events-none absolute bottom-0 left-0 right-0 border-t border-gray-200 bg-gray-100/95 px-4 py-3">
-      <div className="flex items-end gap-2">
-        <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-gray-400 font-ahsing text-xs text-white">
-          {npcName.charAt(0)}
+    <div
+      className="pointer-events-none absolute bottom-0 left-0 right-0"
+      style={{ imageRendering: "pixelated" }}
+    >
+      {/* Outer border */}
+      <div style={{ background: "#e8e8d0", padding: "2px" }}>
+        {/* Inner dark border */}
+        <div style={{ background: "#181820", padding: "2px" }}>
+          {/* Content area */}
+          <div style={{ background: "#181820" }}>
+            {/* Name header bar */}
+            <div style={{
+              background: "#2a2060",
+              borderBottom: "2px solid #e8e8d0",
+              padding: "3px 8px 2px",
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+            }}>
+              <span style={{
+                fontFamily: "'Press Start 2P', monospace",
+                fontSize: "7px",
+                color: "#e8d870",
+                letterSpacing: "0.05em",
+                lineHeight: 1,
+              }}>
+                {npcName}
+              </span>
+            </div>
+            {/* Text area */}
+            <div style={{ padding: "8px 10px 6px" }}>
+              <p style={{
+                fontFamily: "'Press Start 2P', monospace",
+                fontSize: "7px",
+                color: "#e8e8d0",
+                lineHeight: "2",
+                margin: 0,
+                minHeight: "36px",
+                wordBreak: "break-word",
+              }}>
+                {text}
+              </p>
+              <div style={{ textAlign: "right", marginTop: "4px" }}>
+                <span style={{
+                  fontFamily: "'Press Start 2P', monospace",
+                  fontSize: "6px",
+                  color: "#605860",
+                }}>
+                  ▼ SPACE
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
-        <div className="rounded-2xl rounded-bl-sm border border-gray-200 bg-white px-4 py-2 shadow-sm">
-          <p className="mb-0.5 font-ahsing text-[10px] text-gray-400">{npcName}</p>
-          <p className="text-sm text-gray-700">{text}</p>
-        </div>
-        <span className="pb-1 text-xs text-gray-400">{hint}</span>
       </div>
     </div>
   );

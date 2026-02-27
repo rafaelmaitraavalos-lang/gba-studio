@@ -100,17 +100,22 @@ function SpriteWalkCanvas({ items }: { items: SpritePreview[] }) {
       const fh = img.naturalHeight / 4;
       const row = DIR_ROW[dirIdx];
 
+      const drawSize = Math.round(canvas.width * 0.65);
+      const ox = Math.round((canvas.width  - drawSize) / 2);
+      const oy = Math.round((canvas.height - drawSize) / 2);
+
       ctx.clearRect(0, 0, canvas.width, canvas.height);
-      ctx.drawImage(img, frame * fw, row * fh, fw, fh, 0, 0, canvas.width, canvas.height);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(img, frame * fw, row * fh, fw, fh, ox, oy, drawSize, drawSize);
 
       // Name label
       if (items[itemIdx]?.name) {
-        ctx.font = "bold 9px 'Ahsing', sans-serif";
+        ctx.font = "10px 'Ahsing', sans-serif";
         ctx.textAlign = "center";
         ctx.fillStyle = "rgba(0,0,0,0.55)";
-        ctx.fillRect(0, canvas.height - 14, canvas.width, 14);
+        ctx.fillRect(0, canvas.height - 16, canvas.width, 16);
         ctx.fillStyle = "#fff";
-        ctx.fillText(items[itemIdx].name, canvas.width / 2, canvas.height - 3);
+        ctx.fillText(items[itemIdx].name, canvas.width / 2, canvas.height - 4);
       }
 
       rafRef.current = requestAnimationFrame(draw);
@@ -120,7 +125,7 @@ function SpriteWalkCanvas({ items }: { items: SpritePreview[] }) {
   }, [items]);
 
   if (!items.length) return <DefaultPreview />;
-  return <canvas ref={canvasRef} width={80} height={80} className="h-full w-full" style={{ imageRendering: "pixelated" }} />;
+  return <canvas ref={canvasRef} width={128} height={128} className="h-full" style={{ imageRendering: "pixelated", WebkitImageRendering: "crisp-edges" } as React.CSSProperties} />;
 }
 
 // ─── Layered character walk animation ────────────────────────────────────────
@@ -171,23 +176,28 @@ function CharWalkCanvas({ items }: { items: CharPreview[] }) {
       const layers = charLayers[itemIdx] ?? [];
       const row = DIR_ROW[dirIdx];
 
+      const drawSize = Math.round(canvas.width * 0.65);
+      const ox = Math.round((canvas.width  - drawSize) / 2);
+      const oy = Math.round((canvas.height - drawSize) / 2);
+
       ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.imageSmoothingEnabled = false;
       for (const { img } of layers) {
         if (!img.complete || img.naturalWidth === 0) continue;
         const fw = img.naturalWidth  / 4;
         const fh = img.naturalHeight / 4;
-        ctx.drawImage(img, frame * fw, row * fh, fw, fh, 0, 0, canvas.width, canvas.height);
+        ctx.drawImage(img, frame * fw, row * fh, fw, fh, ox, oy, drawSize, drawSize);
       }
 
       // Name label
       const name = items[itemIdx]?.name;
       if (name) {
-        ctx.font = "bold 9px 'Ahsing', sans-serif";
+        ctx.font = "10px 'Ahsing', sans-serif";
         ctx.textAlign = "center";
         ctx.fillStyle = "rgba(0,0,0,0.55)";
-        ctx.fillRect(0, canvas.height - 14, canvas.width, 14);
+        ctx.fillRect(0, canvas.height - 16, canvas.width, 16);
         ctx.fillStyle = "#fff";
-        ctx.fillText(name, canvas.width / 2, canvas.height - 3);
+        ctx.fillText(name, canvas.width / 2, canvas.height - 4);
       }
 
       rafRef.current = requestAnimationFrame(draw);
@@ -197,7 +207,7 @@ function CharWalkCanvas({ items }: { items: CharPreview[] }) {
   }, [items]);
 
   if (!items.length) return <DefaultPreview />;
-  return <canvas ref={canvasRef} width={80} height={80} className="h-full w-full" style={{ imageRendering: "pixelated" }} />;
+  return <canvas ref={canvasRef} width={128} height={128} className="h-full" style={{ imageRendering: "pixelated", WebkitImageRendering: "crisp-edges" } as React.CSSProperties} />;
 }
 
 // ─── Fallback placeholder ─────────────────────────────────────────────────────
@@ -225,7 +235,7 @@ function HubCard({
       href={href}
       className="flex flex-col rounded-xl border-2 border-gray-200 bg-white overflow-hidden transition-all hover:border-accent hover:shadow-lg hover:shadow-blue-100"
     >
-      <div className="h-32 w-full bg-gray-100 overflow-hidden">
+      <div className="h-32 w-full bg-gray-100 overflow-hidden flex items-center justify-center">
         {preview}
       </div>
       <div className="p-4">
@@ -344,7 +354,7 @@ export default function HubMenu() {
       <div className="mt-5 w-full max-w-[720px]">
         <Link
           href={`/project-hub/${projectId}/builder-mode`}
-          className="flex w-full items-center justify-center gap-3 rounded-xl border-2 border-accent bg-accent/10 px-8 py-5 text-accent transition-all hover:bg-accent hover:text-white hover:shadow-lg hover:shadow-blue-200"
+          className="flex w-full items-center justify-center gap-3 rounded-xl bg-accent px-8 py-5 text-white transition-all hover:bg-blue-700 hover:shadow-lg hover:shadow-blue-300"
         >
           <svg width="28" height="28" viewBox="0 0 48 48" fill="none">
             <polygon points="10,8 42,24 10,40" fill="currentColor" />
