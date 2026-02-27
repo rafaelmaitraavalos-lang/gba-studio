@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/lib/auth-context";
 import { useProject } from "@/lib/project-context";
 import { getFirebaseDb } from "@/lib/firebase";
-import { addDoc, collection, serverTimestamp } from "firebase/firestore";
+import { addDoc, collection, deleteDoc, doc, getDocs, serverTimestamp } from "firebase/firestore";
 import ProjectHubNav from "@/components/project-hub/ProjectHubNav";
 
 const SLOTS = [
@@ -17,6 +17,13 @@ const SLOTS = [
 ] as const;
 
 type Slot = typeof SLOTS[number]["id"];
+
+interface SavedItem {
+  id: string;
+  name: string;
+  slot: string;
+  imageBase64: string;
+}
 
 export default function ItemGenerator() {
   const { user, loading } = useAuth();
@@ -33,11 +40,29 @@ export default function ItemGenerator() {
   // Modal state
   const [modalImage, setModalImage] = useState<string | null>(null);
   const [modalName,  setModalName]  = useState("");
+  const [modalSlot,  setModalSlot]  = useState<Slot>("hand");
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+
+  // Library
+  const [savedItems, setSavedItems] = useState<SavedItem[]>([]);
 
   useEffect(() => {
     if (!loading && !user) router.replace("/login");
   }, [loading, user, router]);
+
+  // Load saved items
+  useEffect(() => {
+    if (!user || !projectId) return;
+    const db = getFirebaseDb();
+    getDocs(collection(db, "users", user.uid, "projects", projectId, "items")).then((snap) => {
+      setSavedItems(snap.docs.map((d) => ({
+        id:          d.id,
+        name:        (d.data().name  as string) ?? "Item",
+        slot:        (d.data().slot  as string) ?? "accessory",
+        imageBase64: (d.data().imageBase64 as string) ?? "",
+      })));
+    });
+  }, [user, projectId]);
 
   const handleGenerate = useCallback(async () => {
     if (!description.trim() || isGenerating) return;
@@ -59,6 +84,7 @@ export default function ItemGenerator() {
         return;
       }
       setModalName(itemName.trim() || "Item");
+      setModalSlot(slot);
       setModalImage(data.image);
       setSaveStatus("idle");
     } catch {
@@ -73,19 +99,31 @@ export default function ItemGenerator() {
     setSaveStatus("saving");
     try {
       const db = getFirebaseDb();
-      await addDoc(collection(db, "users", user.uid, "projects", projectId, "items"), {
+      const docRef = await addDoc(collection(db, "users", user.uid, "projects", projectId, "items"), {
         name:        modalName,
         description: description.trim(),
-        slot,
+        slot:        modalSlot,
         imageBase64: modalImage,
         createdAt:   serverTimestamp(),
       });
+      setSavedItems((prev) => [...prev, { id: docRef.id, name: modalName, slot: modalSlot, imageBase64: modalImage }]);
       setSaveStatus("saved");
     } catch (err) {
       console.error("Save failed:", err);
       setSaveStatus("idle");
     }
-  }, [user, projectId, modalImage, modalName, description, slot, saveStatus]);
+  }, [user, projectId, modalImage, modalName, modalSlot, description, saveStatus]);
+
+  const handleDelete = useCallback(async (itemId: string) => {
+    if (!user || !window.confirm("Delete this item?")) return;
+    try {
+      const db = getFirebaseDb();
+      await deleteDoc(doc(db, "users", user.uid, "projects", projectId, "items", itemId));
+      setSavedItems((prev) => prev.filter((i) => i.id !== itemId));
+    } catch (err) {
+      console.error("Delete failed:", err);
+    }
+  }, [user, projectId]);
 
   if (loading || !user) {
     return (
@@ -161,6 +199,23 @@ export default function ItemGenerator() {
 
           {genError && <p className="text-sm text-red-500">{genError}</p>}
         </div>
+
+        {/* Library */}
+        <div className="mt-12 w-full max-w-2xl">
+          <h2 className="mb-4 text-xs font-bold uppercase tracking-wider text-gray-400">
+            Item Library ({savedItems.length})
+          </h2>
+
+          {savedItems.length === 0 ? (
+            <p className="py-8 text-center text-sm text-gray-400">No items saved yet. Generate one above!</p>
+          ) : (
+            <div className="grid grid-cols-4 gap-4">
+              {savedItems.map((item) => (
+                <ItemCard key={item.id} item={item} onDelete={() => handleDelete(item.id)} />
+              ))}
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Modal */}
@@ -195,7 +250,7 @@ export default function ItemGenerator() {
 
             {/* Slot badge */}
             <span className="mt-4 rounded-full bg-gray-100 px-3 py-1 text-xs font-medium text-gray-500 capitalize">
-              {slot}
+              {modalSlot}
             </span>
 
             {/* Save */}
@@ -209,6 +264,31 @@ export default function ItemGenerator() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+function ItemCard({ item, onDelete }: { item: SavedItem; onDelete: () => void }) {
+  return (
+    <div className="group relative flex flex-col items-center rounded-lg border border-gray-200 bg-white p-3">
+      <img
+        src={item.imageBase64}
+        alt={item.name}
+        className="block rounded"
+        style={{ width: 64, height: 64, imageRendering: "pixelated" }}
+      />
+      <p className="mt-2 w-full truncate text-center text-xs font-ahsing text-gray-700">{item.name}</p>
+      <span className="mt-1 rounded-full bg-gray-100 px-2 py-0.5 text-[10px] font-medium text-gray-400 capitalize">
+        {item.slot}
+      </span>
+
+      {/* Delete — visible on hover */}
+      <button
+        onClick={onDelete}
+        className="absolute right-1.5 top-1.5 hidden rounded bg-red-50 px-1.5 py-0.5 text-[10px] text-red-400 hover:bg-red-100 hover:text-red-600 group-hover:block"
+      >
+        ✕
+      </button>
     </div>
   );
 }
