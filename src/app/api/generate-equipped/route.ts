@@ -79,7 +79,7 @@ export async function POST(req: NextRequest) {
   };
   if (imageUrl) {
     modelInput.image_url     = imageUrl;
-    modelInput.noise_strength = 0.15;
+    modelInput.noise_strength = 0.05;
   }
 
   const response = await fetch("https://api.replicate.com/v1/predictions", {
