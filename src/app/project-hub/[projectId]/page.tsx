@@ -258,7 +258,7 @@ export default function HubMenu() {
   const [objects,     setObjects]     = useState<ThumbPreview[]>([]);
   const [mobs,        setMobs]        = useState<SpritePreview[]>([]);
   const [npcs,        setNpcs]        = useState<SpritePreview[]>([]);
-  const [accessories, setAccessories] = useState<ThumbPreview[]>([]);
+  const [items,       setItems]       = useState<ThumbPreview[]>([]);
 
   useEffect(() => {
     if (!loading && !user) router.replace("/login");
@@ -293,8 +293,8 @@ export default function HubMenu() {
       setNpcs(snap.docs.map((d) => ({ id: d.id, name: d.data().name ?? "NPC", spritesheet: d.data().spritesheet ?? "" })).filter((n) => n.spritesheet))
     );
 
-    getDocs(collection(db, base, "accessories")).then((snap) =>
-      setAccessories(snap.docs.map((d) => ({ id: d.id, name: d.data().name ?? "Accessory", imageBase64: d.data().imageBase64 ?? "" })).filter((a) => a.imageBase64))
+    getDocs(collection(db, base, "items")).then((snap) =>
+      setItems(snap.docs.map((d) => ({ id: d.id, name: d.data().name ?? "Item", imageBase64: d.data().imageBase64 ?? "" })).filter((a) => a.imageBase64))
     );
   }, [user, projectId]);
 
@@ -343,10 +343,10 @@ export default function HubMenu() {
           preview={<SpriteWalkCanvas items={npcs} />}
         />
         <HubCard
-          href={`/project-hub/${projectId}/accessories`}
-          label="Accessories"
-          description="Generate capes, hats & weapons"
-          preview={<CyclingImages items={accessories} />}
+          href={`/project-hub/${projectId}/items`}
+          label="Items"
+          description="Generate weapons, armor & accessories"
+          preview={<CyclingImages items={items} />}
         />
       </div>
 

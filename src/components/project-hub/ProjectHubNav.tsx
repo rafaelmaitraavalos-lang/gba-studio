@@ -21,7 +21,7 @@ export default function ProjectHubNav({ projectId, onSave, saveStatus, saveDisab
     { label: "Mobs", href: `${base}/mobs` },
     { label: "NPCs", href: `${base}/npcs` },
     { label: "Characters", href: `${base}/characters` },
-    { label: "Accessories", href: `${base}/accessories` },
+    { label: "Items", href: `${base}/items` },
   ];
 
   return (
