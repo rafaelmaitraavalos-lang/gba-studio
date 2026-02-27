@@ -262,12 +262,17 @@ function EquipPageInner() {
     setResultImage(null);
     setSaveStatus("idle");
     try {
+      // Send the base layer spritesheet for img2img conditioning
+      const sortedLayers = [...selectedChar!.layers].sort((a, b) => a.zIndex - b.zIndex);
+      const characterSpritesheet = sortedLayers[0]?.spritesheet ?? null;
+
       const res = await fetch("/api/generate-equipped", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           characterName: selectedChar!.name,
           equippedItems: equippedList,
+          characterSpritesheet,
         }),
       });
       const data = await res.json();
