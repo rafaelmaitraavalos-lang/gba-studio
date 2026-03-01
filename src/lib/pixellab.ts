@@ -63,14 +63,11 @@ export async function stitchSpritesheet(
     }
   }
 
-  return sharp({
-    create: {
-      width: W,
-      height: H,
-      channels: 4,
-      background: { r: 0, g: 0, b: 0, alpha: 0 },
-    },
-  })
+  // Allocate a fully-transparent RGBA canvas and composite frames onto it.
+  // sharp({ create: { background: { alpha: 0 } } }) is unreliable for
+  // transparency in some versions; raw-buffer input is explicit and correct.
+  const rawCanvas = Buffer.alloc(W * H * 4, 0); // all zeros → alpha = 0
+  return sharp(rawCanvas, { raw: { width: W, height: H, channels: 4 } })
     .composite(composites)
     .png()
     .toBuffer();
@@ -147,13 +144,18 @@ export async function generateWalkSpritesheet(
         "/animate-with-text",
         {
           description,
-          action: "walking forward, simple walk cycle",
+          // Explicit walk cycle action — the more specific, the better the leg movement
+          action: "walking, legs alternating, left and right foot stepping forward in turn, walk cycle",
           reference_image: { type: "base64", base64: imgB64 } as PlImage,
           image_size: { width: 64, height: 64 },
           n_frames: 4,
           view: "low top-down",
           direction: DIRS[i],
-          image_guidance_scale: 3.0,
+          // image_guidance_scale default is 1.4.  We previously used 3.0 which
+          // anchored the model so tightly to the static reference that legs
+          // couldn't move at all.  1.5 keeps the character on-model while
+          // still allowing limb animation.
+          image_guidance_scale: 1.5,
           // animate-with-text has no no_background param; negative_description
           // is the only lever to suppress backgrounds on animation frames
           negative_description: "background, grey background, solid background, scenery, environment",
