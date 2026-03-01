@@ -78,62 +78,84 @@ export async function stitchSpritesheet(
 
 /**
  * Generate a 4-direction walk-cycle spritesheet using PixelLab.
- * If referenceB64 is provided it is used directly; otherwise a reference is
- * generated first with BitForge (south-facing, 64×64).
- * Returns a data URI string.
+ *
+ * Flow:
+ *   1. BitForge  → south-facing 64×64 reference (transparent bg)
+ *   2. Rotate ×3 → west / east / north images derived from that same base
+ *   3. animate-with-text ×4 → 4 walk frames per directional image
+ *   4. Stitch all 16 frames into a 256×256 spritesheet
+ *
+ * All 4 rotations derive from the same BitForge image, so the character
+ * looks consistent across every direction.
+ *
+ * If referenceB64 is provided (e.g. from generate-equipped) it is used as
+ * the south-facing base and step 1 is skipped.
  */
 export async function generateWalkSpritesheet(
   description: string,
   apiKey: string,
-  referenceB64?: string, // raw base64, no data URI prefix
+  referenceB64?: string, // raw base64, no data URI prefix — skips BitForge step
 ): Promise<string> {
-  // ── Step 1: Get or generate reference image ──────────────────────────────
-  let refB64 = referenceB64;
-  if (!refB64) {
-    // BitForge is the right model here: it exposes outline/shading/detail
-    // controls purpose-built for pixel art sprites (vs Pixflux which is
-    // better for large scenes).
-    const refRes = await plPost(
+  // ── Step 1: South-facing base image ──────────────────────────────────────
+  let southB64 = referenceB64;
+  if (!southB64) {
+    const res = await plPost(
       "/generate-image-bitforge",
       {
         description,
         image_size: { width: 64, height: 64 },
-        // "low top-down" matches the GBA RPG camera angle: slight overhead
-        // so you see the character's face when south-facing, back when north.
         view: "low top-down",
         direction: "south",
-        outline: "single color black outline", // crisp GBA sprite silhouette
+        outline: "single color black outline",
         shading: "detailed shading",
         detail: "highly detailed",
-        no_background: true, // transparent bg so it doesn't bleed into animation frames
+        no_background: true,
       },
       apiKey,
     );
-    const refData = (await refRes.json()) as { image: PlImage };
-    refB64 = refData.image.base64;
+    southB64 = ((await res.json()) as { image: PlImage }).image.base64;
   }
 
-  const refImg: PlImage = { type: "base64", base64: refB64 };
+  // ── Step 2: Rotate to west / east / north in parallel ────────────────────
+  const [westB64, eastB64, northB64] = await Promise.all(
+    (["west", "east", "north"] as const).map((toDir) =>
+      plPost(
+        "/rotate",
+        {
+          image_size: { width: 64, height: 64 },
+          from_image: { type: "base64", base64: southB64 } as PlImage,
+          from_view: "low top-down",
+          to_view: "low top-down",
+          from_direction: "south",
+          to_direction: toDir,
+          image_guidance_scale: 3.0,
+        },
+        apiKey,
+      ).then((r) => r.json() as Promise<{ image: PlImage }>)
+       .then((d) => d.image.base64),
+    ),
+  );
 
-  // ── Step 2: Animate 4 directions in parallel ──────────────────────────────
-  // Row order: south, west, east, north  (matches rd-animation four_angle_walking)
-  const DIRS = ["south", "west", "east", "north"] as const;
+  // Row order: south(0), west(1), east(2), north(3)
+  const dirImages = [southB64, westB64, eastB64, northB64];
+  const DIRS     = ["south",   "west",  "east",  "north"] as const;
 
+  // ── Step 3: Animate each directional image → 4 walk frames ───────────────
   const animResults = await Promise.all(
-    DIRS.map((dir) =>
+    dirImages.map((imgB64, i) =>
       plPost(
         "/animate-with-text",
         {
           description,
           action: "walking forward, simple walk cycle",
-          reference_image: refImg,
+          reference_image: { type: "base64", base64: imgB64 } as PlImage,
           image_size: { width: 64, height: 64 },
           n_frames: 4,
           view: "low top-down",
-          direction: dir,
+          direction: DIRS[i],
           image_guidance_scale: 3.0,
           // animate-with-text has no no_background param; negative_description
-          // is the only way to discourage a background being added
+          // is the only lever to suppress backgrounds on animation frames
           negative_description: "background, grey background, solid background, scenery, environment",
         },
         apiKey,
@@ -141,7 +163,7 @@ export async function generateWalkSpritesheet(
     ),
   );
 
-  // ── Step 3: Stitch into 256×256 spritesheet ───────────────────────────────
+  // ── Step 4: Stitch 16 frames into 256×256 spritesheet ────────────────────
   const rows = animResults.map((r) => r.images.map((img) => img.base64));
   const buf = await stitchSpritesheet(rows);
   return `data:image/png;base64,${buf.toString("base64")}`;
