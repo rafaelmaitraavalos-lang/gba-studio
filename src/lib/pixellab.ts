@@ -103,8 +103,9 @@ export async function generateWalkSpritesheet(
         view: "low top-down",
         direction: "south",
         outline: "single color black outline", // crisp GBA sprite silhouette
-        shading: "detailed shading",           // richer than "medium shading"
+        shading: "detailed shading",
         detail: "highly detailed",
+        no_background: true, // transparent bg so it doesn't bleed into animation frames
       },
       apiKey,
     );
@@ -124,15 +125,16 @@ export async function generateWalkSpritesheet(
         "/animate-with-text",
         {
           description,
-          action: "walking",
+          action: "walking forward, simple walk cycle",
           reference_image: refImg,
           image_size: { width: 64, height: 64 },
           n_frames: 4,
-          view: "low top-down",   // consistent GBA overhead angle per direction
+          view: "low top-down",
           direction: dir,
-          // Default image_guidance_scale is 1.4 (very loose).
-          // 3.0 keeps animation frames much closer to the reference character.
           image_guidance_scale: 3.0,
+          // animate-with-text has no no_background param; negative_description
+          // is the only way to discourage a background being added
+          negative_description: "background, grey background, solid background, scenery, environment",
         },
         apiKey,
       ).then((r) => r.json() as Promise<{ images: PlImage[] }>),
