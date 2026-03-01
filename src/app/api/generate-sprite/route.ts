@@ -59,8 +59,10 @@ export async function POST(req: NextRequest) {
             description: improvedPrompt,
             image_size: { width: 64, height: 64 },
             no_background: true,
-            detail: "medium detail",
-            shading: "medium shading",
+            view: "low top-down",
+            outline: "single color black outline",
+            shading: "detailed shading",
+            detail: "highly detailed",
           },
           pixellabKey,
         );

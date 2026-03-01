@@ -90,15 +90,21 @@ export async function generateWalkSpritesheet(
   // ── Step 1: Get or generate reference image ──────────────────────────────
   let refB64 = referenceB64;
   if (!refB64) {
+    // BitForge is the right model here: it exposes outline/shading/detail
+    // controls purpose-built for pixel art sprites (vs Pixflux which is
+    // better for large scenes).
     const refRes = await plPost(
       "/generate-image-bitforge",
       {
         description,
         image_size: { width: 64, height: 64 },
-        view: "side",
+        // "low top-down" matches the GBA RPG camera angle: slight overhead
+        // so you see the character's face when south-facing, back when north.
+        view: "low top-down",
         direction: "south",
-        shading: "medium shading",
-        detail: "medium detail",
+        outline: "single color black outline", // crisp GBA sprite silhouette
+        shading: "detailed shading",           // richer than "medium shading"
+        detail: "highly detailed",
       },
       apiKey,
     );
@@ -122,7 +128,11 @@ export async function generateWalkSpritesheet(
           reference_image: refImg,
           image_size: { width: 64, height: 64 },
           n_frames: 4,
+          view: "low top-down",   // consistent GBA overhead angle per direction
           direction: dir,
+          // Default image_guidance_scale is 1.4 (very loose).
+          // 3.0 keeps animation frames much closer to the reference character.
+          image_guidance_scale: 3.0,
         },
         apiKey,
       ).then((r) => r.json() as Promise<{ images: PlImage[] }>),

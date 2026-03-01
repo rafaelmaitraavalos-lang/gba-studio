@@ -56,8 +56,9 @@ export async function POST(req: NextRequest) {
           image_size: { width: 64, height: 64 },
           no_background: true,
           view: "high top-down",
-          shading: "medium shading",
-          detail: "medium detail",
+          outline: "single color black outline",
+          shading: "detailed shading",
+          detail: "highly detailed",
         },
         pixellabKey,
       );
