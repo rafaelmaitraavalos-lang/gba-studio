@@ -1,11 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
 import {
-  generateWalkSpritesheet,
+  generateWalkSpritesheetV2,
   plPost,
   stitchSpritesheet,
   type PlImage,
 } from "@/lib/pixellab";
+
+export const maxDuration = 180;
 
 /* Layer types that go through the accessory pipeline (item-only, no body) */
 const ACCESSORY_LAYERS = new Set(["hat", "cape", "weapon", "accessory", "shield"]);
@@ -74,7 +76,7 @@ export async function POST(req: NextRequest) {
         spritesheetDataUri = `data:image/png;base64,${buf.toString("base64")}`;
       } else {
         // Humanoid: full 4-direction walk cycle
-        spritesheetDataUri = await generateWalkSpritesheet(improvedPrompt, pixellabKey);
+        spritesheetDataUri = await generateWalkSpritesheetV2(improvedPrompt, pixellabKey);
       }
 
       return NextResponse.json({

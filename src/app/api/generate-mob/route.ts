@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
-import { generateWalkSpritesheet } from "@/lib/pixellab";
+import { generateWalkSpritesheetV2 } from "@/lib/pixellab";
+
+export const maxDuration = 180;
 
 const CLAUDE_SYSTEM = `You are a GBA pixel art enemy designer. Given a mob/enemy description, return an enhanced prompt for a pixel art sprite generator. The mob should look threatening but fit a GBA RPG style like Zelda or Pokemon. It should be a walking/moving creature viewed from slightly above. Include specific colors, features, and style details. Return only the enhanced prompt, no other text.`;
 
@@ -36,7 +38,7 @@ export async function POST(req: NextRequest) {
   // ── Step 2: PixelLab (primary) ─────────────────────────────────────────────
   if (pixellabKey) {
     try {
-      const spritesheet = await generateWalkSpritesheet(improvedPrompt, pixellabKey);
+      const spritesheet = await generateWalkSpritesheetV2(improvedPrompt, pixellabKey);
       return NextResponse.json({ spritesheet, improvedPrompt });
     } catch (err) {
       console.warn("[generate-mob] PixelLab failed, falling back to Replicate:", (err as Error).message);
