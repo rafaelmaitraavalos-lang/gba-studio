@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
+import { plPost, type PlImage } from "@/lib/pixellab";
 
 const SLOT_HINTS: Record<string, string> = {
   head:      "worn on the head — helmet, crown, hat, or headgear, viewed from slightly above",
@@ -18,15 +19,16 @@ export async function POST(req: NextRequest) {
     slot: string;
   };
 
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  const anthropicKey   = process.env.ANTHROPIC_API_KEY;
   const replicateToken = process.env.REPLICATE_API_TOKEN;
+  const pixellabKey    = process.env.PIXELLAB_API_KEY;
 
   if (!anthropicKey)    return NextResponse.json({ error: "Missing Anthropic API key" }, { status: 500 });
   if (!replicateToken)  return NextResponse.json({ error: "Missing Replicate API token" }, { status: 500 });
 
   const slotHint = SLOT_HINTS[slot] ?? SLOT_HINTS.accessory;
 
-  // ── Step 1: Claude enhances the prompt ──
+  // ── Step 1: Claude enhances the prompt ─────────────────────────────────────
   let enhancedPrompt = `${description}, ${slotHint}`;
   try {
     const anthropic = new Anthropic({ apiKey: anthropicKey });
@@ -34,17 +36,35 @@ export async function POST(req: NextRequest) {
       model: "claude-sonnet-4-5-20250929",
       max_tokens: 300,
       system: CLAUDE_SYSTEM,
-      messages: [{
-        role: "user",
-        content: `Item name: "${name}"\nDescription: ${description}\nSlot: ${slotHint}`,
-      }],
+      messages: [{ role: "user", content: `Item name: "${name}"\nDescription: ${description}\nSlot: ${slotHint}` }],
     });
     if (msg.content[0].type === "text") enhancedPrompt = msg.content[0].text.trim();
   } catch (err) {
     console.warn("[generate-item] Claude enhancement failed:", (err as Error).message);
   }
 
-  // ── Step 2: rd-plus topdown_asset — submit then poll ──
+  // ── Step 2: PixelLab (primary) ─────────────────────────────────────────────
+  if (pixellabKey) {
+    try {
+      const res = await plPost(
+        "/generate-image-bitforge",
+        {
+          description: enhancedPrompt,
+          image_size: { width: 64, height: 64 },
+          no_background: true,
+          shading: "medium shading",
+          detail: "medium detail",
+        },
+        pixellabKey,
+      );
+      const data = (await res.json()) as { image: PlImage };
+      return NextResponse.json({ image: `data:image/png;base64,${data.image.base64}` });
+    } catch (err) {
+      console.warn("[generate-item] PixelLab failed, falling back to Replicate:", (err as Error).message);
+    }
+  }
+
+  // ── Step 3: Replicate fallback (rd-plus topdown_asset with polling) ─────────
   let imageBase64: string | null = null;
   try {
     const submitRes = await fetch(
@@ -80,7 +100,7 @@ export async function POST(req: NextRequest) {
       if (poll.status === "failed") break;
     }
   } catch (err) {
-    console.error("[generate-item] Error:", (err as Error).message);
+    console.error("[generate-item] Replicate error:", (err as Error).message);
   }
 
   return NextResponse.json({ image: imageBase64 });

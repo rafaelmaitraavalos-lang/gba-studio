@@ -1,24 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
+import { generateWalkSpritesheet, stripDataUri, extractFirstFrame } from "@/lib/pixellab";
 
 const CLAUDE_SYSTEM = `You are a GBA pixel art RPG character designer. Given a character name and a list of equipped items (slot → item name), write an enhanced prompt for a pixel art walk cycle spritesheet generator. The character should look like a GBA RPG protagonist (Zelda, Fire Emblem, Final Fantasy Tactics Advance style), clearly wearing and holding the described equipment. Include specific visual details about colors, materials, and silhouette for each item. Return only the enhanced prompt, no other text.`;
-
-async function uploadImageToReplicate(base64DataUri: string, token: string): Promise<string> {
-  const base64 = base64DataUri.replace(/^data:image\/\w+;base64,/, "");
-  const buffer = Buffer.from(base64, "base64");
-  const res = await fetch("https://api.replicate.com/v1/files", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "image/png",
-      "Content-Disposition": 'attachment; filename="character.png"',
-    },
-    body: buffer,
-  });
-  if (!res.ok) throw new Error(`Replicate file upload failed: ${res.status} ${await res.text()}`);
-  const file = await res.json() as { urls: { get: string } };
-  return file.urls.get;
-}
 
 export async function POST(req: NextRequest) {
   const { characterName, equippedItems, characterSpritesheet } = (await req.json()) as {
@@ -29,10 +13,11 @@ export async function POST(req: NextRequest) {
 
   const replicateToken = process.env.REPLICATE_API_TOKEN;
   const anthropicKey   = process.env.ANTHROPIC_API_KEY;
+  const pixellabKey    = process.env.PIXELLAB_API_KEY;
 
   if (!replicateToken) return NextResponse.json({ error: "Missing Replicate token" }, { status: 500 });
 
-  // ── Step 1: Claude builds the combined prompt ──
+  // ── Step 1: Claude builds enhanced prompt ──────────────────────────────────
   const itemList = equippedItems.map((i) => `${i.slot}: ${i.name}`).join(", ");
   let enhancedPrompt = `${characterName} character wearing ${itemList}, GBA RPG pixel art, 4-direction walk cycle`;
 
@@ -43,10 +28,7 @@ export async function POST(req: NextRequest) {
         model: "claude-sonnet-4-5-20250929",
         max_tokens: 350,
         system: CLAUDE_SYSTEM,
-        messages: [{
-          role: "user",
-          content: `Character name: "${characterName}"\nEquipped items: ${itemList}`,
-        }],
+        messages: [{ role: "user", content: `Character name: "${characterName}"\nEquipped items: ${itemList}` }],
       });
       if (msg.content[0].type === "text") enhancedPrompt = msg.content[0].text.trim();
     } catch (err) {
@@ -54,34 +36,26 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  // Enforce clothing / no nudity
   enhancedPrompt = `${enhancedPrompt}, fully clothed, wearing outfit, dressed`;
 
-  // ── Step 2: Upload character image for img2img conditioning ──
-  let imageUrl: string | undefined;
-  if (characterSpritesheet) {
+  // ── Step 2: PixelLab (primary) ─────────────────────────────────────────────
+  if (pixellabKey) {
     try {
-      imageUrl = await uploadImageToReplicate(characterSpritesheet, replicateToken);
-      console.log("[generate-equipped] Uploaded reference image:", imageUrl);
+      // Extract the first frame of the character spritesheet as the reference image
+      let referenceB64: string | undefined;
+      if (characterSpritesheet) {
+        const raw = stripDataUri(characterSpritesheet);
+        referenceB64 = await extractFirstFrame(Buffer.from(raw, "base64"));
+      }
+
+      const spritesheet = await generateWalkSpritesheet(enhancedPrompt, pixellabKey, referenceB64);
+      return NextResponse.json({ image: spritesheet });
     } catch (err) {
-      console.warn("[generate-equipped] Image upload failed, falling back to text-only:", (err as Error).message);
+      console.warn("[generate-equipped] PixelLab failed, falling back to Replicate:", (err as Error).message);
     }
   }
 
-  // ── Step 3: rd-animation four_angle_walking ──
-  const modelInput: Record<string, unknown> = {
-    prompt: enhancedPrompt,
-    style: "four_angle_walking",
-    width: 64,
-    height: 64,
-    return_spritesheet: true,
-    negative_prompt: "naked, nude, bare skin, undressed",
-  };
-  if (imageUrl) {
-    modelInput.image_url     = imageUrl;
-    modelInput.noise_strength = 0.05;
-  }
-
+  // ── Step 3: Replicate fallback (text-only rd-animation) ────────────────────
   const response = await fetch("https://api.replicate.com/v1/predictions", {
     method: "POST",
     headers: {
@@ -91,7 +65,14 @@ export async function POST(req: NextRequest) {
     },
     body: JSON.stringify({
       version: "retro-diffusion/rd-animation",
-      input: modelInput,
+      input: {
+        prompt: enhancedPrompt,
+        style: "four_angle_walking",
+        width: 64,
+        height: 64,
+        return_spritesheet: true,
+        negative_prompt: "naked, nude, bare skin, undressed",
+      },
     }),
   });
 
@@ -105,7 +86,5 @@ export async function POST(req: NextRequest) {
   if (!outputUrl) return NextResponse.json({ error: "No image generated" }, { status: 500 });
 
   const buf = await (await fetch(outputUrl)).arrayBuffer();
-  return NextResponse.json({
-    image: `data:image/png;base64,${Buffer.from(buf).toString("base64")}`,
-  });
+  return NextResponse.json({ image: `data:image/png;base64,${Buffer.from(buf).toString("base64")}` });
 }

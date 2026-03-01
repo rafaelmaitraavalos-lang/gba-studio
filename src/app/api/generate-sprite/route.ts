@@ -1,16 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
+import {
+  generateWalkSpritesheet,
+  plPost,
+  stitchSpritesheet,
+  type PlImage,
+} from "@/lib/pixellab";
 
 /* Layer types that go through the accessory pipeline (item-only, no body) */
 const ACCESSORY_LAYERS = new Set(["hat", "cape", "weapon", "accessory", "shield"]);
 
-/* Layer types that go through the humanoid pipeline (full body with walk cycle) */
-const HUMANOID_LAYERS = new Set(["base", "clothing"]);
-
 export async function POST(req: NextRequest) {
   const { prompt, type, layerType } = await req.json();
   const replicateToken = process.env.REPLICATE_API_TOKEN;
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  const anthropicKey   = process.env.ANTHROPIC_API_KEY;
+  const pixellabKey    = process.env.PIXELLAB_API_KEY;
 
   if (!replicateToken) {
     return NextResponse.json({ error: "Missing Replicate token" }, { status: 500 });
@@ -18,41 +22,70 @@ export async function POST(req: NextRequest) {
 
   const isAccessory = ACCESSORY_LAYERS.has(layerType ?? "");
 
-  // ── Step 1: Claude prompt enhancement ──
-  let improvedPrompt = prompt;
+  // ── Step 1: Claude prompt enhancement ──────────────────────────────────────
+  let improvedPrompt = prompt as string;
 
   if (anthropicKey) {
     try {
       const anthropic = new Anthropic({ apiKey: anthropicKey });
-
-      const systemPrompt = `You are a GBA pixel art enemy designer. Given a mob/enemy description, return an enhanced prompt for a pixel art sprite generator. The mob should look threatening but fit a GBA RPG style like Zelda or Pokemon. It should be a walking/moving creature viewed from slightly above. Include specific colors, features, and style details. Return only the enhanced prompt, no other text.`;
-
       const claudeResponse = await anthropic.messages.create({
         model: "claude-sonnet-4-20250514",
         max_tokens: 300,
-        system: systemPrompt,
-        messages: [{
-          role: "user",
-          content: `Convert this into a pixel art generation prompt: "${prompt}"`,
-        }],
+        system: `You are a GBA pixel art RPG character designer. Given a character or accessory description, return an enhanced prompt for a pixel art sprite generator. The sprite should fit a GBA RPG style like Zelda, Fire Emblem, or Pokemon. Include specific colors, features, and style details. Return only the enhanced prompt, no other text.`,
+        messages: [{ role: "user", content: `Convert this into a pixel art generation prompt: "${prompt}"` }],
       });
-
       if (claudeResponse.content[0].type === "text") {
         improvedPrompt = claudeResponse.content[0].text;
       }
     } catch (err) {
-      console.warn("Claude prompt enhancement failed, using fallback:", (err as Error).message);
+      console.warn("[generate-sprite] Claude enhancement failed:", (err as Error).message);
     }
   }
 
-  // ── Step 2: Generate with Replicate ──
-  // Both pipelines use rd-animation with four_angle_walking to get a proper 4x4 spritesheet
-
-  // Enforce clothing on every character prompt sent to Replicate
   if (type === "character") {
     improvedPrompt = `${improvedPrompt}, fully clothed, wearing outfit, dressed`;
   }
 
+  // ── Step 2: PixelLab (primary) ─────────────────────────────────────────────
+  if (pixellabKey) {
+    try {
+      let spritesheetDataUri: string;
+
+      if (isAccessory) {
+        // Accessories: generate a single clean item image, then tile into spritesheet
+        const res = await plPost(
+          "/generate-image-bitforge",
+          {
+            description: improvedPrompt,
+            image_size: { width: 64, height: 64 },
+            no_background: true,
+            detail: "medium detail",
+            shading: "medium shading",
+          },
+          pixellabKey,
+        );
+        const data = (await res.json()) as { image: PlImage };
+        const b64 = data.image.base64;
+        // Tile the single image across all 16 frames
+        const rows = Array.from({ length: 4 }, () => Array(4).fill(b64) as string[]);
+        const buf = await stitchSpritesheet(rows);
+        spritesheetDataUri = `data:image/png;base64,${buf.toString("base64")}`;
+      } else {
+        // Humanoid: full 4-direction walk cycle
+        spritesheetDataUri = await generateWalkSpritesheet(improvedPrompt, pixellabKey);
+      }
+
+      return NextResponse.json({
+        image: spritesheetDataUri,
+        originalPrompt: prompt,
+        improvedPrompt,
+      });
+    } catch (err) {
+      console.warn("[generate-sprite] PixelLab failed, falling back to Replicate:", (err as Error).message);
+    }
+  }
+
+  // ── Step 3: Replicate fallback ─────────────────────────────────────────────
   const NUDITY_NEGATIVE = "naked, nude, bare skin, undressed, topless, shirtless";
 
   const replicateInput: Record<string, unknown> = {
@@ -64,8 +97,7 @@ export async function POST(req: NextRequest) {
   };
 
   if (isAccessory) {
-    replicateInput.negative_prompt =
-      `character, person, humanoid, body, legs, arms, head, face, torso, hands, feet, walking figure, standing figure, scene, background, ${NUDITY_NEGATIVE}`;
+    replicateInput.negative_prompt = `character, person, humanoid, body, legs, arms, head, face, torso, hands, feet, walking figure, standing figure, scene, background, ${NUDITY_NEGATIVE}`;
   } else if (type === "character") {
     replicateInput.negative_prompt = NUDITY_NEGATIVE;
   }
@@ -73,14 +105,11 @@ export async function POST(req: NextRequest) {
   const response = await fetch("https://api.replicate.com/v1/predictions", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${replicateToken}`,
+      Authorization: `Bearer ${replicateToken}`,
       "Content-Type": "application/json",
-      "Prefer": "wait",
+      Prefer: "wait",
     },
-    body: JSON.stringify({
-      version: "retro-diffusion/rd-animation",
-      input: replicateInput,
-    }),
+    body: JSON.stringify({ version: "retro-diffusion/rd-animation", input: replicateInput }),
   });
 
   if (!response.ok) {
@@ -90,18 +119,9 @@ export async function POST(req: NextRequest) {
 
   const prediction = await response.json();
   const imageUrl = prediction.output?.[0];
-
-  if (!imageUrl) {
-    return NextResponse.json({ error: "No image generated" }, { status: 500 });
-  }
+  if (!imageUrl) return NextResponse.json({ error: "No image generated" }, { status: 500 });
 
   const imageRes = await fetch(imageUrl);
-  const buffer = await imageRes.arrayBuffer();
-  const base64 = Buffer.from(buffer).toString("base64");
-
-  return NextResponse.json({
-    image: `data:image/png;base64,${base64}`,
-    originalPrompt: prompt,
-    improvedPrompt: improvedPrompt,
-  });
+  const base64 = Buffer.from(await imageRes.arrayBuffer()).toString("base64");
+  return NextResponse.json({ image: `data:image/png;base64,${base64}`, originalPrompt: prompt, improvedPrompt });
 }

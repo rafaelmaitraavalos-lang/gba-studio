@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import Anthropic from "@anthropic-ai/sdk";
+import { plPost, type PlImage } from "@/lib/pixellab";
 
 interface DoorConfig {
   wall: "north" | "south" | "east" | "west";
@@ -134,46 +135,63 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  // ── Step 2: Retro Diffusion rd-pro dungeon map ──
+  // ── Step 2: Room image generation ─────────────────────────────────────────
   let imageBase64: string | null = null;
-  try {
-    const rdPrompt = `${claude.enhancedPrompt}, top-down view, GBA resolution, pixel art`;
+  const pixellabKey = process.env.PIXELLAB_API_KEY;
 
-    const response = await fetch("https://api.replicate.com/v1/models/retro-diffusion/rd-plus/predictions", {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${replicateToken}`,
-        "Content-Type": "application/json",
-        "Prefer": "wait=60",
-      },
-      body: JSON.stringify({
-        input: {
-          prompt: rdPrompt,
-          style: "topdown_map",
-          width: 240,
-          height: 160,
-          num_images: 1,
+  // PixelLab primary
+  if (pixellabKey) {
+    try {
+      const res = await plPost(
+        "/generate-image-pixflux",
+        {
+          description: `${claude.enhancedPrompt}, GBA pixel art dungeon, top-down view`,
+          image_size: { width: 240, height: 160 },
+          view: "high top-down",
+          shading: "medium shading",
+          detail: "medium detail",
         },
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`Replicate rd-pro HTTP ${response.status}:`, errorText);
-    } else {
-      const prediction = await response.json();
-      const imageUrl = prediction.output?.[0];
-
-      if (imageUrl) {
-        const imageRes = await fetch(imageUrl);
-        const buffer = await imageRes.arrayBuffer();
-        imageBase64 = `data:image/png;base64,${Buffer.from(buffer).toString("base64")}`;
-      } else {
-        console.error("rd-pro returned no image:", JSON.stringify(prediction));
-      }
+        pixellabKey,
+      );
+      const data = (await res.json()) as { image: PlImage };
+      imageBase64 = `data:image/png;base64,${data.image.base64}`;
+    } catch (err) {
+      console.warn("[generate-room] PixelLab failed, falling back to Replicate:", (err as Error).message);
     }
-  } catch (err) {
-    console.error("rd-pro generation error:", (err as Error).message);
+  }
+
+  // Replicate fallback
+  if (!imageBase64) {
+    try {
+      const rdPrompt = `${claude.enhancedPrompt}, top-down view, GBA resolution, pixel art`;
+
+      const response = await fetch("https://api.replicate.com/v1/models/retro-diffusion/rd-plus/predictions", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${replicateToken}`,
+          "Content-Type": "application/json",
+          Prefer: "wait=60",
+        },
+        body: JSON.stringify({
+          input: { prompt: rdPrompt, style: "topdown_map", width: 240, height: 160, num_images: 1 },
+        }),
+      });
+
+      if (!response.ok) {
+        console.error(`Replicate rd-pro HTTP ${response.status}:`, await response.text());
+      } else {
+        const prediction = await response.json();
+        const imageUrl = prediction.output?.[0];
+        if (imageUrl) {
+          const imageRes = await fetch(imageUrl);
+          imageBase64 = `data:image/png;base64,${Buffer.from(await imageRes.arrayBuffer()).toString("base64")}`;
+        } else {
+          console.error("rd-pro returned no image:", JSON.stringify(prediction));
+        }
+      }
+    } catch (err) {
+      console.error("[generate-room] Replicate fallback error:", (err as Error).message);
+    }
   }
 
   return NextResponse.json({
