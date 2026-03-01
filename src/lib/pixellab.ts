@@ -161,11 +161,12 @@ export async function stitchSpritesheet(
  *
  * Flow:
  *   1. POST /v2/create-character-with-4-directions → character_id + create job_id
- *   2. POST /v2/animate-character (template: 'walking') → animate job_id
- *   3. Poll both jobs concurrently every 3 s (timeout 3 min)
- *   4. GET /v2/characters/{character_id} — logs full raw response so the
+ *   2. Poll create job until completed (must finish before animating)
+ *   3. POST /v2/animate-character (template: 'walking') → animate job_id
+ *   4. Poll animate job until completed
+ *   5. GET /v2/characters/{character_id} — logs full raw response so the
  *      response structure can be inspected on first run
- *   5. Extract direction images + walking animation frames; stitch 256×256 sheet
+ *   6. Extract direction images + walking animation frames; stitch 256×256 sheet
  *
  * Returns a data URI string.
  */
@@ -190,7 +191,12 @@ export async function generateWalkSpritesheetV2(
   const { character_id, background_job_id: createJobId } = createData;
   console.log(`[pixellab-v2] character_id=${character_id} create_job=${createJobId}`);
 
-  // ── Step 2: Queue walk animation immediately ────────────────────────────────
+  // ── Step 2: Wait for create job to finish before animating ──────────────────
+  // animate-character requires the character to already exist in the system.
+  await pollJob(createJobId, apiKey);
+  console.log("[pixellab-v2] create job complete — queuing animation");
+
+  // ── Step 3: Queue walk animation ────────────────────────────────────────────
   const animRes = await v2Post(
     "/animate-character",
     {
@@ -199,18 +205,20 @@ export async function generateWalkSpritesheetV2(
     },
     apiKey,
   );
-  const animData = (await animRes.json()) as { background_job_id: string };
-  const animJobId = animData.background_job_id;
-  console.log(`[pixellab-v2] animate_job=${animJobId}`);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const animRaw = (await animRes.json()) as Record<string, any>;
+  console.log("[pixellab-v2] animate-character raw response:\n", JSON.stringify(animRaw, null, 2));
+  const animJobId: string | undefined = animRaw.background_job_id;
 
-  // ── Step 3: Poll both jobs concurrently ─────────────────────────────────────
-  await Promise.all([
-    pollJob(createJobId, apiKey),
-    pollJob(animJobId, apiKey),
-  ]);
-  console.log("[pixellab-v2] both jobs complete");
+  // ── Step 4: Poll animate job (if the endpoint is async) ─────────────────────
+  if (animJobId) {
+    await pollJob(animJobId, apiKey);
+    console.log("[pixellab-v2] animate job complete");
+  } else {
+    console.log("[pixellab-v2] animate-character returned no background_job_id — treating as synchronous");
+  }
 
-  // ── Step 4: Fetch character data and log raw structure ──────────────────────
+  // ── Step 5: Fetch character data and log raw structure ──────────────────────
   const charRes = await v2Get(`/characters/${character_id}`, apiKey);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const charData = (await charRes.json()) as Record<string, any>;
@@ -221,7 +229,7 @@ export async function generateWalkSpritesheetV2(
     JSON.stringify(charData, null, 2),
   );
 
-  // ── Step 5: Extract images and stitch spritesheet ───────────────────────────
+  // ── Step 6: Extract images and stitch spritesheet ───────────────────────────
   // Attempt to locate the walking animation frames.
   // We try several plausible shapes; the logged response will confirm which is right.
   const DIR_ORDER = ["south", "west", "east", "north"] as const;
