@@ -80,10 +80,11 @@ async function pollJob(
   jobId: string,
   apiKey: string,
   timeoutMs = 180_000,
+  intervalMs = 3_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 3000));
+    await new Promise((r) => setTimeout(r, intervalMs));
     const res = await v2Get(`/background-jobs/${jobId}`, apiKey);
     const job = (await res.json()) as { status: string; error?: string };
     console.log(`[pixellab-v2] job ${jobId} → ${job.status}`);
@@ -163,7 +164,8 @@ export async function stitchSpritesheet(
  *   1. POST /v2/create-character-with-4-directions → character_id + create job_id
  *   2. Poll create job until completed
  *   3. POST /v2/animate-character with template_animation_id:'walking'
- *   4. Wait 30 s, then GET /v2/characters/{id} — logs full response to find walk frames
+ *   4. Poll animate job every 5 s until completed (timeout 3 min)
+ *   5. GET /v2/characters/{id} — logs full response to find walk frames
  *   5. Stitch 256×256 spritesheet from rotation_urls (static fallback while walk frames TBD)
  *
  * Returns a data URI string.
@@ -202,10 +204,15 @@ export async function generateWalkSpritesheetV2(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const animRaw = (await animRes.json()) as Record<string, any>;
   console.log("[pixellab-v2] animate-character raw response:\n", JSON.stringify(animRaw, null, 2));
+  const animJobId: string | undefined = animRaw.background_job_id;
 
-  // ── Step 4: Wait 30 s, then fetch character to inspect animation data ───────
-  console.log("[pixellab-v2] waiting 30 s for animation to process…");
-  await new Promise((r) => setTimeout(r, 30_000));
+  // ── Step 4: Poll animate job to completion ───────────────────────────────────
+  if (animJobId) {
+    await pollJob(animJobId, apiKey, 180_000, 5_000);
+    console.log("[pixellab-v2] animate job complete");
+  } else {
+    console.warn("[pixellab-v2] animate-character returned no background_job_id — skipping poll");
+  }
 
   const charRes = await v2Get(`/characters/${character_id}`, apiKey);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
