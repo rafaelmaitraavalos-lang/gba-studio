@@ -157,17 +157,16 @@ export async function stitchSpritesheet(
 // ─── V2 character pipeline ────────────────────────────────────────────────────
 
 /**
- * Generate a 4-direction walk-cycle spritesheet using the PixelLab V2 API.
+ * Generate a 4-direction spritesheet using the PixelLab V2 API.
  *
  * Flow:
  *   1. POST /v2/create-character-with-4-directions → character_id + create job_id
- *   2. Poll create job until completed (must finish before animating)
- *   3. POST /v2/animate-character (template: 'walking') → animate job_id
- *   4. Poll animate job until completed
- *   5. GET /v2/characters/{character_id} — logs full raw response so the
- *      response structure can be inspected on first run
- *   6. Extract direction images + walking animation frames; stitch 256×256 sheet
+ *   2. Poll create job until completed
+ *   3. GET /v2/characters/{character_id} → rotation_urls.{south,west,east,north}
+ *   4. Fetch each URL and convert to base64
+ *   5. Stitch 4×4 spritesheet (each direction image tiled across 4 columns)
  *
+ * Walk animation (animation_count > 0) is not yet wired up — static frames only.
  * Returns a data URI string.
  */
 export async function generateWalkSpritesheetV2(
@@ -191,108 +190,44 @@ export async function generateWalkSpritesheetV2(
   const { character_id, background_job_id: createJobId } = createData;
   console.log(`[pixellab-v2] character_id=${character_id} create_job=${createJobId}`);
 
-  // ── Step 2: Wait for create job to finish before animating ──────────────────
-  // animate-character requires the character to already exist in the system.
+  // ── Step 2: Wait for create job to finish ───────────────────────────────────
   await pollJob(createJobId, apiKey);
-  console.log("[pixellab-v2] create job complete — queuing animation");
+  console.log("[pixellab-v2] create job complete");
 
-  // ── Step 3: Queue walk animation ────────────────────────────────────────────
-  const animRes = await v2Post(
-    "/animate-character",
-    {
-      character_id,
-      template_animation_id: "walking",
-    },
-    apiKey,
-  );
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const animRaw = (await animRes.json()) as Record<string, any>;
-  console.log("[pixellab-v2] animate-character raw response:\n", JSON.stringify(animRaw, null, 2));
-  const animJobId: string | undefined = animRaw.background_job_id;
-
-  // ── Step 4: Poll animate job (if the endpoint is async) ─────────────────────
-  if (animJobId) {
-    await pollJob(animJobId, apiKey);
-    console.log("[pixellab-v2] animate job complete");
-  } else {
-    console.log("[pixellab-v2] animate-character returned no background_job_id — treating as synchronous");
-  }
-
-  // ── Step 5: Fetch character data and log raw structure ──────────────────────
+  // ── Step 3: Fetch character data ─────────────────────────────────────────────
   const charRes = await v2Get(`/characters/${character_id}`, apiKey);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const charData = (await charRes.json()) as Record<string, any>;
-
-  // Log the full response so we can inspect the real shape on first run
   console.log(
     "[pixellab-v2] GET /characters raw response:\n",
     JSON.stringify(charData, null, 2),
   );
 
-  // ── Step 6: Extract images and stitch spritesheet ───────────────────────────
-  // Attempt to locate the walking animation frames.
-  // We try several plausible shapes; the logged response will confirm which is right.
+  // ── Step 4: Extract rotation_urls and fetch each as base64 ──────────────────
   const DIR_ORDER = ["south", "west", "east", "north"] as const;
-
-  // Try to find animation frames keyed by direction
-  // Expected shape (best guess): charData.animations[].frames.{south,west,east,north}[]
-  // Alternative: charData.animations[].directions.{south,...}.frames[]
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const animations: any[] = Array.isArray(charData.animations)
-    ? charData.animations
-    : [];
-  const walkAnim =
-    animations.find(
-      (a) =>
-        a?.template_animation_id === "walking" ||
-        a?.name === "walking" ||
-        a?.animation_name === "walking",
-    ) ?? animations[0];
-
-  console.log("[pixellab-v2] walk animation entry:", JSON.stringify(walkAnim, null, 2));
+  const rotationUrls: Record<string, string> = charData.rotation_urls ?? {};
 
   const rows: string[][] = [];
-
   for (const dir of DIR_ORDER) {
-    // Try frames keyed under the direction name
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const frameCandidates: any[] =
-      walkAnim?.frames?.[dir] ??
-      walkAnim?.directions?.[dir]?.frames ??
-      walkAnim?.directions?.[dir] ??
-      [];
-
-    const frameB64s: string[] = [];
-    for (const frame of frameCandidates.slice(0, 4)) {
-      const b64 = await resolveImage(frame);
-      if (b64) frameB64s.push(b64);
+    const url = rotationUrls[dir];
+    if (!url) {
+      console.warn(`[pixellab-v2] no rotation_url for direction '${dir}'`);
+      rows.push([]);
+      continue;
     }
-
-    // If the animation has no per-direction frames, fall back to the
-    // static direction image from the character's directions map
-    if (frameB64s.length === 0) {
-      console.warn(
-        `[pixellab-v2] no walk frames found for direction '${dir}', ` +
-          "falling back to static direction image",
-      );
-      const staticImg =
-        charData.directions?.[dir] ??
-        charData.images?.[dir] ??
-        charData[dir];
-      const b64 = await resolveImage(staticImg);
-      if (b64) frameB64s.push(b64);
-    }
-
-    rows.push(frameB64s);
+    const b64 = await urlToBase64(url);
+    // Tile the single static frame across all 4 columns
+    rows.push([b64, b64, b64, b64]);
   }
 
   if (rows.every((r) => r.length === 0)) {
     throw new Error(
-      "[pixellab-v2] Could not extract any images from character response. " +
-        "Check the logged raw response above to update the parser.",
+      "[pixellab-v2] No rotation_urls found in character response. " +
+        "Check the logged raw response above.",
     );
   }
 
+  // ── Step 5: Stitch 256×256 spritesheet ──────────────────────────────────────
   const buf = await stitchSpritesheet(rows);
   return `data:image/png;base64,${buf.toString("base64")}`;
 }
