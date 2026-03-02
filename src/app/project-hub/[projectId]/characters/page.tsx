@@ -35,8 +35,8 @@ const DIRECTION_ARROWS: Record<Direction, string> = {
 const DIRECTION_TO_ROW: Record<Direction, number> = {
   down: 0,
   right: 1,
-  up: 2,
-  left: 3,
+  left: 2,
+  up: 3,
 };
 
 type ParsedFrameCache = Map<string, HTMLCanvasElement[][]>;
