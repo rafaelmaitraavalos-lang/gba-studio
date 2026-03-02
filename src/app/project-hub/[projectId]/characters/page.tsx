@@ -48,15 +48,16 @@ function parseSpritesheetToCanvases(
     const img = new Image();
     img.onload = () => {
       const srcCanvas = document.createElement("canvas");
-      srcCanvas.width = img.width;
-      srcCanvas.height = img.height;
+      srcCanvas.width = img.naturalWidth;
+      srcCanvas.height = img.naturalHeight;
       const srcCtx = srcCanvas.getContext("2d")!;
       srcCtx.imageSmoothingEnabled = false;
       srcCtx.drawImage(img, 0, 0);
 
-      const numCols = img.width / GRID_SIZE;   // 4 for 256-wide, 8 for 512-wide
+      const numCols = img.naturalWidth / GRID_SIZE;
       const frameW = GRID_SIZE;
-      const frameH = img.height / 4;
+      const frameH = img.naturalHeight / 4;
+      console.log(`[parseSpritesheetToCanvases] naturalSize=${img.naturalWidth}x${img.naturalHeight} frameW=${frameW} frameH=${frameH} numCols=${numCols}`);
 
       const rows: HTMLCanvasElement[][] = [];
       for (let row = 0; row < 4; row++) {
