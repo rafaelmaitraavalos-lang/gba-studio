@@ -81,14 +81,16 @@ async function pollJob(
   apiKey: string,
   timeoutMs = 180_000,
   intervalMs = 3_000,
-): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+): Promise<Record<string, any>> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, intervalMs));
     const res = await v2Get(`/background-jobs/${jobId}`, apiKey);
-    const job = (await res.json()) as { status: string; error?: string };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const job = (await res.json()) as { status: string; error?: string; last_response?: any };
     console.log(`[pixellab-v2] job ${jobId} → ${job.status}`);
-    if (job.status === "completed") return;
+    if (job.status === "completed") return job;
     if (job.status === "failed")
       throw new Error(`Job ${jobId} failed: ${job.error ?? "unknown"}`);
   }
@@ -203,22 +205,33 @@ export async function generateWalkSpritesheetV2(
   );
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const animRaw = (await animRes.json()) as Record<string, any>;
-  console.log("[pixellab-v2] animate-character raw response:\n", JSON.stringify(animRaw, null, 2));
-  const animJobId: string | undefined = animRaw.background_job_id;
+  // Log every field — specifically looking for background_job_ids (array), animation_id, URLs
+  console.log("[pixellab-v2] animate-character FULL response:\n", JSON.stringify(animRaw, null, 2));
 
-  // ── Step 4: Poll animate job to completion ───────────────────────────────────
-  if (animJobId) {
-    await pollJob(animJobId, apiKey, 180_000, 5_000);
-    console.log("[pixellab-v2] animate job complete");
+  // API returns background_job_ids (plural array), one job per direction
+  const animJobIds: string[] = Array.isArray(animRaw.background_job_ids)
+    ? animRaw.background_job_ids
+    : [];
+  console.log(`[pixellab-v2] animate job IDs: ${JSON.stringify(animJobIds)}, directions: ${JSON.stringify(animRaw.directions)}`);
+
+  // ── Step 4: Poll all animate jobs and log their last_response ────────────────
+  if (animJobIds.length > 0) {
+    const completedJobs = await Promise.all(
+      animJobIds.map((id) => pollJob(id, apiKey, 180_000, 5_000)),
+    );
+    console.log("[pixellab-v2] all animate jobs complete");
+    completedJobs.forEach((job, i) => {
+      console.log(`[pixellab-v2] animate job[${i}] last_response:\n`, JSON.stringify(job.last_response, null, 2));
+    });
   } else {
-    console.warn("[pixellab-v2] animate-character returned no background_job_id — skipping poll");
+    console.warn("[pixellab-v2] no background_job_ids in animate-character response — skipping poll");
   }
 
   const charRes = await v2Get(`/characters/${character_id}`, apiKey);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const charData = (await charRes.json()) as Record<string, any>;
   console.log(
-    "[pixellab-v2] GET /characters after animate raw response:\n",
+    "[pixellab-v2] GET /characters after animate FULL response:\n",
     JSON.stringify(charData, null, 2),
   );
 
