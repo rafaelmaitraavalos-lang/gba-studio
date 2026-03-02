@@ -165,10 +165,11 @@ export async function stitchSpritesheet(
  * Flow:
  *   1. POST /v2/create-character-with-4-directions → character_id + create job_id
  *   2. Poll create job until completed
- *   3. POST /v2/animate-character with template_animation_id:'walking'
- *   4. Poll animate job every 5 s until completed (timeout 3 min)
- *   5. GET /v2/characters/{id} — logs full response to find walk frames
- *   5. Stitch 256×256 spritesheet from rotation_urls (static fallback while walk frames TBD)
+ *   3. POST /v2/animate-character (template: 'walking') → background_job_ids[] + directions[]
+ *   4. allSettled-poll all animate jobs every 5 s (timeout 3 min)
+ *      Walk frames: last_response.storage_urls.frames[0..3] (array of PNG URLs)
+ *   5. GET /v2/characters/{id} → rotation_urls for static fallback
+ *   6. Stitch 256×256: walk frames per direction, static ×4 for any failed direction
  *
  * Returns a data URI string.
  */
@@ -208,11 +209,12 @@ export async function generateWalkSpritesheetV2(
   // Log every field — specifically looking for background_job_ids (array), animation_id, URLs
   console.log("[pixellab-v2] animate-character FULL response:\n", JSON.stringify(animRaw, null, 2));
 
-  // API returns background_job_ids (plural array), one job per direction
+  // API returns background_job_ids (plural array) + directions[], one job per direction
   const animJobIds: string[] = Array.isArray(animRaw.background_job_ids)
     ? animRaw.background_job_ids
     : [];
-  console.log(`[pixellab-v2] animate job IDs: ${JSON.stringify(animJobIds)}, directions: ${JSON.stringify(animRaw.directions)}`);
+  const animDirections: string[] = Array.isArray(animRaw.directions) ? animRaw.directions : [];
+  console.log(`[pixellab-v2] animate job IDs: ${JSON.stringify(animJobIds)}, directions: ${JSON.stringify(animDirections)}`);
 
   // ── Step 4: Poll all animate jobs (allSettled — one failure won't abort others) ─
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -220,47 +222,52 @@ export async function generateWalkSpritesheetV2(
     ? (await Promise.allSettled(
         animJobIds.map((id) => pollJob(id, apiKey, 180_000, 5_000)),
       )).map((result, i) => {
-        if (result.status === "fulfilled") {
-          console.log(`[pixellab-v2] animate job[${i}] last_response:\n`, JSON.stringify(result.value.last_response, null, 2));
-          return result.value;
-        }
-        console.warn(`[pixellab-v2] animate job[${i}] failed: ${(result.reason as Error).message} — will use static frame`);
+        if (result.status === "fulfilled") return result.value;
+        console.warn(`[pixellab-v2] animate job[${i}] (${animDirections[i]}) failed: ${(result.reason as Error).message} — will use static frame`);
         return null;
       })
     : (console.warn("[pixellab-v2] no background_job_ids — skipping animate poll"), []);
 
+  // Build direction → walk frames map from last_response.storage_urls.frames[0..3]
+  const walkFrames: Record<string, string[]> = {};
+  for (let i = 0; i < animDirections.length; i++) {
+    const dir = animDirections[i];
+    const job = animJobResults[i];
+    const frameUrls: string[] = job?.last_response?.storage_urls?.frames ?? [];
+    if (frameUrls.length > 0) {
+      walkFrames[dir] = await Promise.all(frameUrls.slice(0, 4).map(urlToBase64));
+      console.log(`[pixellab-v2] loaded ${walkFrames[dir].length} walk frames for '${dir}'`);
+    }
+  }
+
+  // ── Step 5: GET character for rotation_urls (static fallback) ───────────────
   const charRes = await v2Get(`/characters/${character_id}`, apiKey);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const charData = (await charRes.json()) as Record<string, any>;
-  console.log(
-    "[pixellab-v2] GET /characters after animate FULL response:\n",
-    JSON.stringify(charData, null, 2),
-  );
-
-  // ── Step 5: Extract rotation_urls; use static frame ×4 per direction (walk frames TBD) ─
-  const DIR_ORDER = ["south", "west", "east", "north"] as const;
   const rotationUrls: Record<string, string> = charData.rotation_urls ?? {};
 
+  // ── Step 6: Build rows — walk frames if available, static ×4 otherwise ──────
+  const DIR_ORDER = ["south", "west", "east", "north"] as const;
   const rows: string[][] = [];
+
   for (const dir of DIR_ORDER) {
-    const url = rotationUrls[dir];
-    if (!url) {
-      console.warn(`[pixellab-v2] no rotation_url for direction '${dir}'`);
-      rows.push([]);
-      continue;
+    if (walkFrames[dir]?.length > 0) {
+      rows.push(walkFrames[dir]);
+    } else {
+      const staticUrl = rotationUrls[dir];
+      if (!staticUrl) {
+        console.warn(`[pixellab-v2] no rotation_url for direction '${dir}' — skipping row`);
+        rows.push([]);
+        continue;
+      }
+      const b64 = await urlToBase64(staticUrl);
+      console.log(`[pixellab-v2] '${dir}': no walk frames, using static rotation image ×4`);
+      rows.push([b64, b64, b64, b64]);
     }
-    const b64 = await urlToBase64(url);
-    // Tile static frame ×4 — walk frames will replace this once their location is confirmed
-    rows.push([b64, b64, b64, b64]);
   }
 
-  void animJobResults; // referenced above for logging; walk frame extraction pending
-
   if (rows.every((r) => r.length === 0)) {
-    throw new Error(
-      "[pixellab-v2] No rotation_urls found in character response. " +
-        "Check the logged raw response above.",
-    );
+    throw new Error("[pixellab-v2] No frames found for any direction.");
   }
 
   // ── Step 6: Stitch 256×256 spritesheet ──────────────────────────────────────
