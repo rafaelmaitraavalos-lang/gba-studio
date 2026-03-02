@@ -12,7 +12,7 @@ export const GBA_PALETTE: string[] = [
 
 export type PixelData = (string | null)[][];
 export type Direction = "down" | "up" | "left" | "right";
-export type FrameIndex = 0 | 1 | 2 | 3;
+export type FrameIndex = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
 export type FrameTuple = [PixelData, PixelData, PixelData, PixelData];
 
 export interface CharacterSprite {

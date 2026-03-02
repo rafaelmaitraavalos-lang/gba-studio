@@ -54,13 +54,14 @@ function parseSpritesheetToCanvases(
       srcCtx.imageSmoothingEnabled = false;
       srcCtx.drawImage(img, 0, 0);
 
-      const frameW = img.width / 4;
+      const numCols = img.width / GRID_SIZE;   // 4 for 256-wide, 8 for 512-wide
+      const frameW = GRID_SIZE;
       const frameH = img.height / 4;
 
       const rows: HTMLCanvasElement[][] = [];
       for (let row = 0; row < 4; row++) {
         const frameCols: HTMLCanvasElement[] = [];
-        for (let col = 0; col < 4; col++) {
+        for (let col = 0; col < numCols; col++) {
           const c = document.createElement("canvas");
           c.width = GRID_SIZE;
           c.height = GRID_SIZE;
@@ -209,7 +210,11 @@ export default function CharacterCreator() {
   // Animation preview
   useEffect(() => {
     const interval = setInterval(() => {
-      animFrameRef.current = ((animFrameRef.current + 1) % 4) as FrameIndex;
+      const firstLayer = character.layers[0];
+      const numFrames = firstLayer
+        ? (parsedCacheRef.current.get(firstLayer.id)?.[0]?.length ?? 8)
+        : 8;
+      animFrameRef.current = ((animFrameRef.current + 1) % numFrames) as FrameIndex;
       const canvas = previewCanvasRef.current;
       if (!canvas) return;
       const ctx = canvas.getContext("2d");
