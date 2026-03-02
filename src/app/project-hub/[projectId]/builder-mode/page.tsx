@@ -30,7 +30,7 @@ const NPC_SIZE = 48;
 const NPC_INTERACT_RANGE = 72;
 
 const DIRECTION_TO_ROW: Record<Direction, number> = {
-  down: 0, right: 1, left: 2, up: 3,
+  down: 0, left: 1, right: 2, up: 3,
 };
 
 const SPAWN_FACING: Record<string, Direction> = {
