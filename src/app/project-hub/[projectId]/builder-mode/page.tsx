@@ -274,7 +274,7 @@ async function preRenderCompositeFrames(layers: CharacterLayer[]): Promise<Map<s
   }
   if (parsedLayers.length === 0) return cache;
   for (const [dir, rowIdx] of Object.entries(DIRECTION_TO_ROW)) {
-    for (let fi = 0; fi < 4; fi++) {
+    for (let fi = 0; fi < 8; fi++) {
       const composite = document.createElement("canvas");
       composite.width = GRID_SIZE;
       composite.height = GRID_SIZE;
@@ -552,6 +552,7 @@ export default function BuilderMode() {
   const pixelPosRef = useRef({ x: Math.round(CANVAS_W / 2 - CHAR_SIZE / 2), y: Math.round(CANVAS_H / 2 - CHAR_SIZE / 2) });
   const keysHeldRef = useRef<Set<string>>(new Set());
   const playerDirRef = useRef<Direction>("down");
+  const playerPrevDirRef = useRef<Direction>("down");
   const playerFrameRef = useRef(0);
   const lastAnimTickRef = useRef(0);
   const rafIdRef = useRef(0);
@@ -1168,6 +1169,11 @@ export default function BuilderMode() {
 
       // ── Animation ──
       const moving = dx !== 0 || dy !== 0;
+      if (playerDirRef.current !== playerPrevDirRef.current) {
+        playerFrameRef.current = 0;
+        lastAnimTickRef.current = ts;
+        playerPrevDirRef.current = playerDirRef.current;
+      }
       if (moving) {
         if (ts - lastAnimTickRef.current >= ANIM_INTERVAL) {
           playerFrameRef.current = (playerFrameRef.current + 1) % 8;
