@@ -157,16 +157,15 @@ export async function stitchSpritesheet(
 // ─── V2 character pipeline ────────────────────────────────────────────────────
 
 /**
- * Generate a 4-direction spritesheet using the PixelLab V2 API.
+ * Generate a 4-direction walk-cycle spritesheet using the PixelLab V2 API.
  *
  * Flow:
  *   1. POST /v2/create-character-with-4-directions → character_id + create job_id
  *   2. Poll create job until completed
- *   3. GET /v2/characters/{character_id} → rotation_urls.{south,west,east,north}
- *   4. Fetch each URL and convert to base64
- *   5. Stitch 4×4 spritesheet (each direction image tiled across 4 columns)
+ *   3. POST /v2/animate-character with template_animation_id:'walking'
+ *   4. Wait 30 s, then GET /v2/characters/{id} — logs full response to find walk frames
+ *   5. Stitch 256×256 spritesheet from rotation_urls (static fallback while walk frames TBD)
  *
- * Walk animation (animation_count > 0) is not yet wired up — static frames only.
  * Returns a data URI string.
  */
 export async function generateWalkSpritesheetV2(
@@ -194,16 +193,29 @@ export async function generateWalkSpritesheetV2(
   await pollJob(createJobId, apiKey);
   console.log("[pixellab-v2] create job complete");
 
-  // ── Step 3: Fetch character data ─────────────────────────────────────────────
+  // ── Step 3: Queue walk animation ────────────────────────────────────────────
+  const animRes = await v2Post(
+    "/animate-character",
+    { character_id, template_animation_id: "walking" },
+    apiKey,
+  );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const animRaw = (await animRes.json()) as Record<string, any>;
+  console.log("[pixellab-v2] animate-character raw response:\n", JSON.stringify(animRaw, null, 2));
+
+  // ── Step 4: Wait 30 s, then fetch character to inspect animation data ───────
+  console.log("[pixellab-v2] waiting 30 s for animation to process…");
+  await new Promise((r) => setTimeout(r, 30_000));
+
   const charRes = await v2Get(`/characters/${character_id}`, apiKey);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const charData = (await charRes.json()) as Record<string, any>;
   console.log(
-    "[pixellab-v2] GET /characters raw response:\n",
+    "[pixellab-v2] GET /characters after animate raw response:\n",
     JSON.stringify(charData, null, 2),
   );
 
-  // ── Step 4: Extract rotation_urls and fetch each as base64 ──────────────────
+  // ── Step 5: Extract rotation_urls and fetch each as base64 ──────────────────
   const DIR_ORDER = ["south", "west", "east", "north"] as const;
   const rotationUrls: Record<string, string> = charData.rotation_urls ?? {};
 
@@ -216,7 +228,7 @@ export async function generateWalkSpritesheetV2(
       continue;
     }
     const b64 = await urlToBase64(url);
-    // Tile the single static frame across all 4 columns
+    // Tile static frame ×4 for now — walk frames will replace this once located
     rows.push([b64, b64, b64, b64]);
   }
 
@@ -227,7 +239,7 @@ export async function generateWalkSpritesheetV2(
     );
   }
 
-  // ── Step 5: Stitch 256×256 spritesheet ──────────────────────────────────────
+  // ── Step 6: Stitch 256×256 spritesheet ──────────────────────────────────────
   const buf = await stitchSpritesheet(rows);
   return `data:image/png;base64,${buf.toString("base64")}`;
 }
