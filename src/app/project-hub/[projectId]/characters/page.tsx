@@ -33,9 +33,9 @@ const DIRECTION_ARROWS: Record<Direction, string> = {
 };
 
 const DIRECTION_TO_ROW: Record<Direction, number> = {
-  up: 0,
+  down: 0,
   right: 1,
-  down: 2,
+  up: 2,
   left: 3,
 };
 
