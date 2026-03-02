@@ -30,7 +30,7 @@ const NPC_SIZE = 48;
 const NPC_INTERACT_RANGE = 72;
 
 const DIRECTION_TO_ROW: Record<Direction, number> = {
-  up: 0, right: 1, down: 2, left: 3,
+  down: 0, right: 1, up: 2, left: 3,
 };
 
 const SPAWN_FACING: Record<string, Direction> = {
@@ -235,12 +235,13 @@ function parseLayerSpritesheet(dataUri: string): Promise<HTMLCanvasElement[][]> 
       const srcCtx = srcCanvas.getContext("2d")!;
       srcCtx.imageSmoothingEnabled = false;
       srcCtx.drawImage(img, 0, 0);
-      const frameW = img.width / 4;
+      const numCols = img.width / GRID_SIZE; // 4 for 256-wide, 8 for 512-wide
+      const frameW = GRID_SIZE;
       const frameH = img.height / 4;
       const rows: HTMLCanvasElement[][] = [];
       for (let row = 0; row < 4; row++) {
         const cols: HTMLCanvasElement[] = [];
-        for (let col = 0; col < 4; col++) {
+        for (let col = 0; col < numCols; col++) {
           const c = document.createElement("canvas");
           c.width = GRID_SIZE;
           c.height = GRID_SIZE;
@@ -363,12 +364,13 @@ function parseMobSpritesheet(dataUri: string): Promise<HTMLCanvasElement[][]> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
-      const frameW = img.width / 4;
+      const numCols = img.width / MOB_SIZE; // 4 for 256-wide, 8 for 512-wide
+      const frameW = MOB_SIZE;
       const frameH = img.height / 4;
       const rows: HTMLCanvasElement[][] = [];
       for (let row = 0; row < 4; row++) {
         const cols: HTMLCanvasElement[] = [];
-        for (let col = 0; col < 4; col++) {
+        for (let col = 0; col < numCols; col++) {
           const c = document.createElement("canvas");
           c.width = MOB_SIZE;
           c.height = MOB_SIZE;
@@ -495,7 +497,7 @@ function updateNPCState(state: NPCState, npc: PlacedNPC, ts: number): NPCState {
     }
 
     if (moving && ts - lastAnimTick >= ANIM_INTERVAL) {
-      frame = (frame + 1) % 4;
+      frame = (frame + 1) % 8;
       lastAnimTick = ts;
     } else if (!moving) {
       frame = 0;
@@ -1168,7 +1170,7 @@ export default function BuilderMode() {
       const moving = dx !== 0 || dy !== 0;
       if (moving) {
         if (ts - lastAnimTickRef.current >= ANIM_INTERVAL) {
-          playerFrameRef.current = (playerFrameRef.current + 1) % 4;
+          playerFrameRef.current = (playerFrameRef.current + 1) % 8;
           lastAnimTickRef.current = ts;
         }
       } else {
@@ -2842,15 +2844,15 @@ function MobThumb({ spritesheet }: { spritesheet: string }) {
     function animate(ts: number) {
       if (!ctx || !canvas) return;
       if (ts - lastTickRef.current >= 200) {
-        frameRef.current = (frameRef.current + 1) % 4;
+        frameRef.current = (frameRef.current + 1) % 8;
         lastTickRef.current = ts;
       }
       ctx.clearRect(0, 0, 40, 40);
       const sheet = imgRef.current;
       if (sheet && sheet.complete && sheet.naturalWidth > 0) {
-        const fw = sheet.width / 4;
+        const fw = sheet.width / 8;
         const fh = sheet.height / 4;
-        ctx.drawImage(sheet, frameRef.current * fw, 2 * fh, fw, fh, 0, 0, 40, 40);
+        ctx.drawImage(sheet, frameRef.current * fw, 0 * fh, fw, fh, 0, 0, 40, 40);
       }
       rafRef.current = requestAnimationFrame(animate);
     }
