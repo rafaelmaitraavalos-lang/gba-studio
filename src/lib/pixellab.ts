@@ -214,18 +214,20 @@ export async function generateWalkSpritesheetV2(
     : [];
   console.log(`[pixellab-v2] animate job IDs: ${JSON.stringify(animJobIds)}, directions: ${JSON.stringify(animRaw.directions)}`);
 
-  // ── Step 4: Poll all animate jobs and log their last_response ────────────────
-  if (animJobIds.length > 0) {
-    const completedJobs = await Promise.all(
-      animJobIds.map((id) => pollJob(id, apiKey, 180_000, 5_000)),
-    );
-    console.log("[pixellab-v2] all animate jobs complete");
-    completedJobs.forEach((job, i) => {
-      console.log(`[pixellab-v2] animate job[${i}] last_response:\n`, JSON.stringify(job.last_response, null, 2));
-    });
-  } else {
-    console.warn("[pixellab-v2] no background_job_ids in animate-character response — skipping poll");
-  }
+  // ── Step 4: Poll all animate jobs (allSettled — one failure won't abort others) ─
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const animJobResults: (Record<string, any> | null)[] = animJobIds.length > 0
+    ? (await Promise.allSettled(
+        animJobIds.map((id) => pollJob(id, apiKey, 180_000, 5_000)),
+      )).map((result, i) => {
+        if (result.status === "fulfilled") {
+          console.log(`[pixellab-v2] animate job[${i}] last_response:\n`, JSON.stringify(result.value.last_response, null, 2));
+          return result.value;
+        }
+        console.warn(`[pixellab-v2] animate job[${i}] failed: ${(result.reason as Error).message} — will use static frame`);
+        return null;
+      })
+    : (console.warn("[pixellab-v2] no background_job_ids — skipping animate poll"), []);
 
   const charRes = await v2Get(`/characters/${character_id}`, apiKey);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -235,7 +237,7 @@ export async function generateWalkSpritesheetV2(
     JSON.stringify(charData, null, 2),
   );
 
-  // ── Step 5: Extract rotation_urls and fetch each as base64 ──────────────────
+  // ── Step 5: Extract rotation_urls; use static frame ×4 per direction (walk frames TBD) ─
   const DIR_ORDER = ["south", "west", "east", "north"] as const;
   const rotationUrls: Record<string, string> = charData.rotation_urls ?? {};
 
@@ -248,9 +250,11 @@ export async function generateWalkSpritesheetV2(
       continue;
     }
     const b64 = await urlToBase64(url);
-    // Tile static frame ×4 for now — walk frames will replace this once located
+    // Tile static frame ×4 — walk frames will replace this once their location is confirmed
     rows.push([b64, b64, b64, b64]);
   }
+
+  void animJobResults; // referenced above for logging; walk frame extraction pending
 
   if (rows.every((r) => r.length === 0)) {
     throw new Error(
