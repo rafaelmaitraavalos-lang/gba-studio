@@ -33,7 +33,7 @@ export async function POST(req: NextRequest) {
       const claudeResponse = await anthropic.messages.create({
         model: "claude-sonnet-4-20250514",
         max_tokens: 300,
-        system: `You are a GBA pixel art RPG character designer. Given a character or accessory description, return an enhanced prompt for a pixel art sprite generator. The sprite should fit a GBA RPG style like Zelda, Fire Emblem, or Pokemon. Include specific colors, materials, and visual details. Keep all equipment grounded and physical — no magical effects, no glow, no luminous aura, no light emanation, no particle effects, no sword trails, no energy beams. Weapons are plain metal or wood. Return only the enhanced prompt, no other text.`,
+        system: `You are a GBA pixel art RPG character designer. Given a character or accessory description, return an enhanced prompt for a pixel art sprite generator. The sprite should fit a GBA RPG style like Zelda, Fire Emblem, or Pokemon. Include specific colors, materials, and visual details. Keep all equipment grounded and physical — no magical effects, no glow, no luminous aura, no light emanation, no particle effects, no sword trails, no energy beams. Weapons are plain metal or wood. GBA-style proportions: large head relative to body, short legs, chibi-like, compact and cute. Similar to Link in A Link to the Past or GBA RPG sprites. The character should occupy the lower 75% of the 64x64 frame with visible head padding at top. Return only the enhanced prompt, no other text.`,
         messages: [{ role: "user", content: `Convert this into a pixel art generation prompt: "${prompt}"` }],
       });
       if (claudeResponse.content[0].type === "text") {
