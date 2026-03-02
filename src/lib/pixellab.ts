@@ -199,46 +199,52 @@ export async function generateWalkSpritesheetV2(
   await pollJob(createJobId, apiKey);
   console.log("[pixellab-v2] create job complete");
 
-  // ── Step 3: Queue walk animation ────────────────────────────────────────────
-  const animRes = await v2Post(
-    "/animate-character",
-    { character_id, template_animation_id: "walking-8-frames" },
-    apiKey,
-  );
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const animRaw = (await animRes.json()) as Record<string, any>;
-  // Log every field — specifically looking for background_job_ids (array), animation_id, URLs
-  console.log("[pixellab-v2] animate-character FULL response:\n", JSON.stringify(animRaw, null, 2));
-
-  // API returns background_job_ids (plural array) + directions[], one job per direction
-  const animJobIds: string[] = Array.isArray(animRaw.background_job_ids)
-    ? animRaw.background_job_ids
-    : [];
-  const animDirections: string[] = Array.isArray(animRaw.directions) ? animRaw.directions : [];
-  console.log(`[pixellab-v2] animate job IDs: ${JSON.stringify(animJobIds)}, directions: ${JSON.stringify(animDirections)}`);
-
-  // ── Step 4: Poll all animate jobs (allSettled — one failure won't abort others) ─
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const animJobResults: (Record<string, any> | null)[] = animJobIds.length > 0
-    ? (await Promise.allSettled(
-        animJobIds.map((id) => pollJob(id, apiKey, 180_000, 5_000)),
-      )).map((result, i) => {
-        if (result.status === "fulfilled") return result.value;
-        console.warn(`[pixellab-v2] animate job[${i}] (${animDirections[i]}) failed: ${(result.reason as Error).message} — will use static frame`);
-        return null;
-      })
-    : (console.warn("[pixellab-v2] no background_job_ids — skipping animate poll"), []);
-
-  // Build direction → walk frames map from last_response.storage_urls.frames[0..3]
+  // ── Steps 3–4: Animate + poll — errors here never escape to the route ────────
+  // Any failure (HTTP error, timeout, bad response) falls back to static frames
+  // per direction. Only the create step (above) should trigger the Replicate fallback.
   const walkFrames: Record<string, string[]> = {};
-  for (let i = 0; i < animDirections.length; i++) {
-    const dir = animDirections[i];
-    const job = animJobResults[i];
-    const frameUrls: string[] = job?.last_response?.storage_urls?.frames ?? [];
-    if (frameUrls.length > 0) {
-      walkFrames[dir] = await Promise.all(frameUrls.slice(0, 8).map(urlToBase64));
-      console.log(`[pixellab-v2] loaded ${walkFrames[dir].length} walk frames for '${dir}'`);
+  try {
+    const animRes = await v2Post(
+      "/animate-character",
+      { character_id, template_animation_id: "walking-8-frames" },
+      apiKey,
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const animRaw = (await animRes.json()) as Record<string, any>;
+    console.log("[pixellab-v2] animate-character FULL response:\n", JSON.stringify(animRaw, null, 2));
+
+    const animJobIds: string[] = Array.isArray(animRaw.background_job_ids)
+      ? animRaw.background_job_ids
+      : [];
+    const animDirections: string[] = Array.isArray(animRaw.directions) ? animRaw.directions : [];
+    console.log(`[pixellab-v2] animate job IDs: ${JSON.stringify(animJobIds)}, directions: ${JSON.stringify(animDirections)}`);
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const animJobResults: (Record<string, any> | null)[] = animJobIds.length > 0
+      ? (await Promise.allSettled(
+          animJobIds.map((id) => pollJob(id, apiKey, 180_000, 5_000)),
+        )).map((result, i) => {
+          if (result.status === "fulfilled") return result.value;
+          console.warn(`[pixellab-v2] animate job[${i}] (${animDirections[i]}) failed: ${(result.reason as Error).message} — will use static frame`);
+          return null;
+        })
+      : (console.warn("[pixellab-v2] no background_job_ids — skipping animate poll"), []);
+
+    for (let i = 0; i < animDirections.length; i++) {
+      const dir = animDirections[i];
+      const job = animJobResults[i];
+      const frameUrls: string[] = job?.last_response?.storage_urls?.frames ?? [];
+      if (frameUrls.length > 0) {
+        try {
+          walkFrames[dir] = await Promise.all(frameUrls.slice(0, 8).map(urlToBase64));
+          console.log(`[pixellab-v2] loaded ${walkFrames[dir].length} walk frames for '${dir}'`);
+        } catch (err) {
+          console.warn(`[pixellab-v2] failed to fetch walk frames for '${dir}': ${(err as Error).message} — will use static frame`);
+        }
+      }
     }
+  } catch (err) {
+    console.warn(`[pixellab-v2] animate step failed: ${(err as Error).message} — all directions will use static frames`);
   }
 
   // ── Step 5: GET character for rotation_urls (static fallback) ───────────────
@@ -261,9 +267,14 @@ export async function generateWalkSpritesheetV2(
         rows.push([]);
         continue;
       }
-      const b64 = await urlToBase64(staticUrl);
-      console.log(`[pixellab-v2] '${dir}': no walk frames, using static rotation image ×8`);
-      rows.push([b64, b64, b64, b64, b64, b64, b64, b64]);
+      try {
+        const b64 = await urlToBase64(staticUrl);
+        console.log(`[pixellab-v2] '${dir}': no walk frames, using static rotation image ×8`);
+        rows.push([b64, b64, b64, b64, b64, b64, b64, b64]);
+      } catch (err) {
+        console.warn(`[pixellab-v2] failed to fetch static frame for '${dir}': ${(err as Error).message} — skipping row`);
+        rows.push([]);
+      }
     }
   }
 
