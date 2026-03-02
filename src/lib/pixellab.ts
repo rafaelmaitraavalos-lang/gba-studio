@@ -121,14 +121,15 @@ async function resolveImage(value: unknown): Promise<string | null> {
 // ─── Shared spritesheet stitcher ──────────────────────────────────────────────
 
 /**
- * Stitch a 4×4 grid of 64×64 frames into a single 256×256 spritesheet.
+ * Stitch a grid of 64×64 frames into a spritesheet.
  * rows[r][c] = raw base64 PNG.  Missing frames fall back to the first frame of that row.
+ * numCols is inferred from the widest row (e.g. 4 → 256×256, 8 → 512×256).
  */
 export async function stitchSpritesheet(
   rows: string[][],
   frameSize = 64,
 ): Promise<Buffer> {
-  const numCols = 4;
+  const numCols = Math.max(...rows.map((r) => r.length), 1);
   const numRows = 4;
   const W = numCols * frameSize;
   const H = numRows * frameSize;
@@ -201,7 +202,7 @@ export async function generateWalkSpritesheetV2(
   // ── Step 3: Queue walk animation ────────────────────────────────────────────
   const animRes = await v2Post(
     "/animate-character",
-    { character_id, template_animation_id: "walking" },
+    { character_id, template_animation_id: "walking-8-frames" },
     apiKey,
   );
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -235,7 +236,7 @@ export async function generateWalkSpritesheetV2(
     const job = animJobResults[i];
     const frameUrls: string[] = job?.last_response?.storage_urls?.frames ?? [];
     if (frameUrls.length > 0) {
-      walkFrames[dir] = await Promise.all(frameUrls.slice(0, 4).map(urlToBase64));
+      walkFrames[dir] = await Promise.all(frameUrls.slice(0, 8).map(urlToBase64));
       console.log(`[pixellab-v2] loaded ${walkFrames[dir].length} walk frames for '${dir}'`);
     }
   }
@@ -261,8 +262,8 @@ export async function generateWalkSpritesheetV2(
         continue;
       }
       const b64 = await urlToBase64(staticUrl);
-      console.log(`[pixellab-v2] '${dir}': no walk frames, using static rotation image ×4`);
-      rows.push([b64, b64, b64, b64]);
+      console.log(`[pixellab-v2] '${dir}': no walk frames, using static rotation image ×8`);
+      rows.push([b64, b64, b64, b64, b64, b64, b64, b64]);
     }
   }
 
