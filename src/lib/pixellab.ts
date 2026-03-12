@@ -365,6 +365,11 @@ export async function generateWalkSpritesheet(
   return `data:image/png;base64,${buf.toString("base64")}`;
 }
 
+// ─── V2 public helper ─────────────────────────────────────────────────────────
+
+/** POST to a PixelLab v2 endpoint and throw on HTTP error. */
+export { v2Post as plV2Post };
+
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
 /** Strip a data URI prefix and return raw base64. */

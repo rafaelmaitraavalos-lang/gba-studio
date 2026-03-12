@@ -22,7 +22,8 @@ interface SavedMob {
   spritesheet: string;
 }
 
-const DIR_LABELS = ["Up", "Right", "Down", "Left"] as const;
+// Row order matches spritesheet: row 0=south(down), 1=west(left), 2=east(right), 3=north(up)
+const DIR_LABELS = ["Down", "Left", "Right", "Up"] as const;
 
 export default function MobGenerator() {
   const { user, loading } = useAuth();
@@ -34,7 +35,7 @@ export default function MobGenerator() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [spritesheet, setSpritesheet] = useState<string | null>(null);
   const [genError, setGenError] = useState<string | null>(null);
-  const [previewDir, setPreviewDir] = useState(2); // 0=up,1=right,2=down,3=left
+  const [previewDir, setPreviewDir] = useState(0); // index into DIR_LABELS, matches spritesheet row
   const [savedMobs, setSavedMobs] = useState<SavedMob[]>([]);
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
 
@@ -83,14 +84,14 @@ export default function MobGenerator() {
     function animate(ts: number) {
       if (!ctx || !canvas) return;
       if (ts - lastTickRef.current >= 150) {
-        frameRef.current = (frameRef.current + 1) % 4;
+        frameRef.current = (frameRef.current + 1) % 8;
         lastTickRef.current = ts;
       }
       const sheet = sheetImgRef.current;
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       if (sheet && sheet.complete && sheet.naturalWidth > 0) {
-        const fw = sheet.width / 4;
-        const fh = sheet.height / 4;
+        const fw = sheet.naturalWidth / 8;
+        const fh = sheet.naturalHeight / 4;
         ctx.imageSmoothingEnabled = false;
         ctx.drawImage(sheet, frameRef.current * fw, previewDir * fh, fw, fh, 0, 0, canvas.width, canvas.height);
       }
@@ -307,17 +308,17 @@ function MobCard({ mob, onDelete }: { mob: SavedMob; onDelete: () => void }) {
     function animate(ts: number) {
       if (!ctx || !canvas) return;
       if (ts - lastTickRef.current >= 200) {
-        frameRef.current = (frameRef.current + 1) % 4;
+        frameRef.current = (frameRef.current + 1) % 8;
         lastTickRef.current = ts;
       }
       ctx.clearRect(0, 0, canvas.width, canvas.height);
       const sheet = imgRef.current;
       if (sheet && sheet.complete && sheet.naturalWidth > 0) {
-        const fw = sheet.width / 4;
-        const fh = sheet.height / 4;
+        const fw = sheet.naturalWidth / 8;
+        const fh = sheet.naturalHeight / 4;
         ctx.imageSmoothingEnabled = false;
-        // Show "down" row (row 2) walking
-        ctx.drawImage(sheet, frameRef.current * fw, 2 * fh, fw, fh, 0, 0, canvas.width, canvas.height);
+        // Row 0 = south (down-facing)
+        ctx.drawImage(sheet, frameRef.current * fw, 0, fw, fh, 0, 0, canvas.width, canvas.height);
       }
       rafRef.current = requestAnimationFrame(animate);
     }

@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
 import { useProject } from "@/lib/project-context";
 import { getFirebaseDb } from "@/lib/firebase";
-import { addDoc, collection, getDocs, serverTimestamp } from "firebase/firestore";
+import { addDoc, collection, doc, getDocs, serverTimestamp, updateDoc } from "firebase/firestore";
 import ProjectHubNav from "@/components/project-hub/ProjectHubNav";
 import { type CharacterLayer } from "@/lib/characters";
 
@@ -63,7 +63,8 @@ async function compositeEquippedSpritesheet(
 ): Promise<string> {
   const charImg = await loadImg(charSpritesheet);
   const W = charImg.naturalWidth, H = charImg.naturalHeight;
-  const frameW = W / 4, frameH = H / 4;
+  const numCols = W / 64;               // 4 for Replicate (256px), 8 for PixelLab (512px)
+  const frameW = 64, frameH = H / 4;   // frames are always 64×64
 
   const canvas = document.createElement("canvas");
   canvas.width  = W;
@@ -74,7 +75,7 @@ async function compositeEquippedSpritesheet(
   // Draw the full character spritesheet as base
   ctx.drawImage(charImg, 0, 0);
 
-  // Stamp each item icon onto all 16 frames
+  // Stamp each item icon onto all frames
   for (const item of items) {
     const placement = SLOT_PLACEMENT[item.slot];
     if (!placement) continue;
@@ -84,7 +85,7 @@ async function compositeEquippedSpritesheet(
 
     ctx.globalAlpha = 0.88;
     for (let row = 0; row < 4; row++) {
-      for (let col = 0; col < 4; col++) {
+      for (let col = 0; col < numCols; col++) {
         const fx = col * frameW;
         const fy = row * frameH;
         const ix = fx + (frameW - dw) / 2;          // center horizontally in frame
@@ -96,6 +97,35 @@ async function compositeEquippedSpritesheet(
   }
 
   return canvas.toDataURL("image/png");
+}
+
+/**
+ * Extract frame 0 from each of the 4 direction rows of a spritesheet.
+ * Works for both 512×256 (8-col PixelLab) and 256×256 (4-col Replicate) sheets
+ * because each frame is always 64×64 regardless of total width.
+ * Returns raw base64 (no data URI prefix) per direction.
+ */
+async function extractDirectionFrames(
+  spritesheet: string,
+): Promise<{ south: string; west: string; east: string; north: string }> {
+  const img = await loadImg(spritesheet);
+  const fh = img.naturalHeight / 4; // always 64
+  const dirs = ["south", "west", "east", "north"] as const;
+  console.log(`[equip] extractDirectionFrames: sheet ${img.naturalWidth}×${img.naturalHeight}, fh=${fh}`);
+  const result = {} as Record<string, string>;
+  for (let row = 0; row < 4; row++) {
+    const c = document.createElement("canvas");
+    c.width = 64;
+    c.height = 64;
+    const ctx = c.getContext("2d")!;
+    ctx.imageSmoothingEnabled = false;
+    // col 0, row N: sx=0, sy=row*fh, sw=64, sh=fh → dest 64×64
+    ctx.drawImage(img, 0, row * fh, 64, fh, 0, 0, 64, 64);
+    const b64 = c.toDataURL("image/png").replace(/^data:[^;]+;base64,/, "");
+    console.log(`[equip] extractDirectionFrames: dir="${dirs[row]}" ← row ${row} (sy=${row * fh}) b64_len=${b64.length} prefix=${b64.slice(0, 12)}`);
+    result[dirs[row]] = b64;
+  }
+  return result as { south: string; west: string; east: string; north: string };
 }
 
 // ─── Character canvas (animated walk preview) ─────────────────────────────────
@@ -119,15 +149,15 @@ function CharCanvas({ layers }: { layers: CharacterLayer[] }) {
     let frame = 0;
     let last  = 0;
     const W = canvas.width, H = canvas.height;
-    const DIR_ROW = 2; // down-facing row
+    const DIR_ROW = 0; // row 0 = south (down-facing)
 
     function draw(ts: number) {
-      if (ts - last >= 150) { frame = (frame + 1) % 4; last = ts; }
+      if (ts - last >= 150) { frame = (frame + 1) % 8; last = ts; }
       ctx!.clearRect(0, 0, W, H);
       ctx!.imageSmoothingEnabled = false;
       for (const img of images) {
         if (!img.complete || !img.naturalWidth) continue;
-        const fw = img.naturalWidth / 4, fh = img.naturalHeight / 4;
+        const fw = img.naturalWidth / 8, fh = img.naturalHeight / 4;
         ctx!.drawImage(img, frame * fw, DIR_ROW * fh, fw, fh, 0, 0, W, H);
       }
       rafRef.current = requestAnimationFrame(draw);
@@ -263,6 +293,10 @@ function EquipPageInner() {
   const [resultImage, setResultImage] = useState<string | null>(null);
   const [resultName, setResultName] = useState("");
   const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  const [elapsed, setElapsed] = useState(0);
+  const elapsedIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [placement, setPlacement] = useState("right hip");
+  const [customPlacement, setCustomPlacement] = useState("");
 
   useEffect(() => {
     if (!loading && !user) router.replace("/login");
@@ -323,22 +357,20 @@ function EquipPageInner() {
     setGenError(null);
     setResultImage(null);
     setSaveStatus("idle");
+    setElapsed(0);
+    elapsedIntervalRef.current = setInterval(() => setElapsed((s) => s + 1), 1000);
+
     try {
-      // Get the base layer spritesheet (lowest zIndex)
+      // Extract frame 0 per direction from the base spritesheet (client-side canvas)
       const sortedLayers = [...selectedChar!.layers].sort((a, b) => a.zIndex - b.zIndex);
       const baseSpritesheet = sortedLayers[0]?.spritesheet ?? null;
 
-      // Composite item icons onto the spritesheet so the AI sees them already placed
-      const itemsWithImages = (Object.entries(equipped) as [Slot, SavedItem][])
-        .filter(([, item]) => item?.imageBase64)
-        .map(([slot, item]) => ({ slot, imageBase64: item.imageBase64 }));
-
-      let characterSpritesheet = baseSpritesheet;
-      if (baseSpritesheet && itemsWithImages.length > 0) {
+      let directionFrames: Record<string, string> | undefined;
+      if (baseSpritesheet) {
         try {
-          characterSpritesheet = await compositeEquippedSpritesheet(baseSpritesheet, itemsWithImages);
+          directionFrames = await extractDirectionFrames(baseSpritesheet);
         } catch (err) {
-          console.warn("[equip] Compositing failed, using raw spritesheet:", err);
+          console.warn("[equip] extractDirectionFrames failed:", err);
         }
       }
 
@@ -346,17 +378,24 @@ function EquipPageInner() {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          characterName: selectedChar!.name,
-          equippedItems: equippedList,
-          characterSpritesheet,
+          characterName:    selectedChar!.name,
+          equippedItems:    equippedList,
+          directionFrames,
+          characterSpritesheet: baseSpritesheet, // kept for Replicate fallback
+          placement: placement === "custom" ? customPlacement.trim() : placement,
         }),
       });
       const data = await res.json();
+      console.log("[equip] API status:", res.status);
+      console.log("[equip] API response keys:", Object.keys(data));
+      console.log("[equip] spritesheetUrl:", data.spritesheetUrl?.slice(0, 50));
+      console.log("[equip] data.image:", data.image?.slice(0, 50));
       if (!res.ok || !data.image) { setGenError(data.error ?? "Generation failed"); return; }
       setResultImage(data.image);
     } catch {
       setGenError("Failed to generate");
     } finally {
+      if (elapsedIntervalRef.current) clearInterval(elapsedIntervalRef.current);
       setIsGenerating(false);
     }
   }, [canGenerate, isGenerating, selectedChar, equippedList]);
@@ -367,12 +406,19 @@ function EquipPageInner() {
     try {
       const db = getFirebaseDb();
       await addDoc(collection(db, "users", user.uid, "projects", projectId, "equipped"), {
-        name:        resultName,
-        spritesheet: resultImage,
-        characterId: selectedCharId,
+        name:          resultName,
+        spritesheet:   resultImage,
+        characterId:   selectedCharId,
         equippedItems: equippedList,
-        createdAt:   serverTimestamp(),
+        createdAt:     serverTimestamp(),
       });
+      // Also stamp equippedSpritesheetUrl onto the character document itself
+      if (selectedCharId) {
+        await updateDoc(
+          doc(db, "users", user.uid, "projects", projectId, "characters", selectedCharId),
+          { equippedSpritesheetUrl: resultImage },
+        );
+      }
       setSaveStatus("saved");
     } catch (err) {
       console.error("Save failed:", err);
@@ -417,13 +463,48 @@ function EquipPageInner() {
           {selectedChar && (
             <p className="text-lg font-ahsing text-foreground">{selectedChar.name}</p>
           )}
+          {/* Item placement */}
+          <div className="flex flex-col items-center gap-2">
+            <label className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
+              Item Placement
+            </label>
+            <select
+              value={placement}
+              onChange={(e) => setPlacement(e.target.value)}
+              disabled={isGenerating}
+              className="rounded-lg border border-gray-300 bg-white px-3 py-1.5 text-sm text-gray-700 focus:outline-none focus:ring-1 focus:ring-purple-400 disabled:opacity-50"
+            >
+              <option value="right hip">Right hip</option>
+              <option value="left hip">Left hip</option>
+              <option value="sheathed on back">Sheathed on back</option>
+              <option value="left arm">Left arm</option>
+              <option value="both hands">Both hands</option>
+              <option value="custom">Custom…</option>
+            </select>
+            {placement === "custom" && (
+              <input
+                type="text"
+                value={customPlacement}
+                onChange={(e) => setCustomPlacement(e.target.value)}
+                placeholder="e.g. floating behind shoulder"
+                disabled={isGenerating}
+                className="w-56 rounded-lg border border-gray-300 px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-purple-400 disabled:opacity-50"
+              />
+            )}
+          </div>
+
           <button
             onClick={handleGenerate}
-            disabled={!canGenerate || isGenerating}
+            disabled={!canGenerate || isGenerating || (placement === "custom" && !customPlacement.trim())}
             className="mt-4 rounded-xl bg-purple-600 px-10 py-3 text-base font-medium text-white hover:bg-purple-700 disabled:cursor-not-allowed disabled:opacity-40 transition-colors"
           >
-            {isGenerating ? "Generating…" : "Generate Equipped Character"}
+            {isGenerating
+              ? `Applying… ${Math.floor(elapsed / 60)}:${String(elapsed % 60).padStart(2, "0")}`
+              : "Apply Equipment"}
           </button>
+          {isGenerating && (
+            <p className="text-xs text-gray-400">Regenerating walk cycle for all 4 directions (~2 min)</p>
+          )}
           {!canGenerate && !isGenerating && (
             <p className="text-xs text-gray-400">
               {!selectedChar ? "Select a character" : "Equip at least one item"}
@@ -479,9 +560,14 @@ function EquipPageInner() {
             <p className="mb-5 text-sm font-bold uppercase tracking-wider text-gray-400">Equipped Character</p>
             <img
               src={resultImage}
-              alt="Generated spritesheet"
-              style={{ width: 256, height: 256, imageRendering: "pixelated", display: "block" }}
-              className="rounded-xl border border-gray-200"
+              alt="Equipped character"
+              style={{
+                imageRendering: "pixelated",
+                width: "128px",
+                height: "128px",
+                objectFit: "none",
+                objectPosition: "0 0",
+              }}
             />
             <input
               type="text"
@@ -522,8 +608,8 @@ function CharThumb({ layers }: { layers: CharacterLayer[] }) {
         if (!l.spritesheet) return;
         const img = new Image();
         img.onload = () => {
-          const fw = img.naturalWidth / 4, fh = img.naturalHeight / 4;
-          ctx.drawImage(img, 0, 2 * fh, fw, fh, 0, 0, 64, 64); // down row = row 2
+          const fw = img.naturalWidth / 8, fh = img.naturalHeight / 4;
+          ctx.drawImage(img, 0, 0, fw, fh, 0, 0, 64, 64); // frame 0, row 0 = south
         };
         img.src = l.spritesheet;
       });

@@ -238,6 +238,7 @@ function parseLayerSpritesheet(dataUri: string): Promise<HTMLCanvasElement[][]> 
       const numCols = img.naturalWidth / GRID_SIZE;
       const frameW = GRID_SIZE;
       const frameH = img.naturalHeight / 4;
+      console.log(`[parseLayerSpritesheet] ${img.naturalWidth}×${img.naturalHeight} → numCols=${numCols} frameW=${frameW} frameH=${frameH}`);
       const rows: HTMLCanvasElement[][] = [];
       for (let row = 0; row < 4; row++) {
         const cols: HTMLCanvasElement[] = [];
@@ -273,15 +274,19 @@ async function preRenderCompositeFrames(layers: CharacterLayer[]): Promise<Map<s
     }
   }
   if (parsedLayers.length === 0) return cache;
+  console.log(`[preRenderCompositeFrames] ${parsedLayers.length} layer(s), row lengths:`, parsedLayers[0]?.map(r => r.length));
   for (const [dir, rowIdx] of Object.entries(DIRECTION_TO_ROW)) {
+    // Detect actual frame count for this row (4 for Replicate, 8 for PixelLab)
+    const numFrames = parsedLayers[0]?.[rowIdx as unknown as number]?.length ?? 8;
     for (let fi = 0; fi < 8; fi++) {
+      const srcFi = fi % numFrames; // wrap so 4-frame sheets loop rather than go blank
       const composite = document.createElement("canvas");
       composite.width = GRID_SIZE;
       composite.height = GRID_SIZE;
       const ctx = composite.getContext("2d")!;
       ctx.imageSmoothingEnabled = false;
       for (const parsed of parsedLayers) {
-        if (parsed[rowIdx]?.[fi]) ctx.drawImage(parsed[rowIdx][fi], 0, 0);
+        if (parsed[rowIdx]?.[srcFi]) ctx.drawImage(parsed[rowIdx][srcFi], 0, 0);
       }
       cache.set(`${dir}:${fi}`, composite);
     }
@@ -364,9 +369,9 @@ function parseMobSpritesheet(dataUri: string): Promise<HTMLCanvasElement[][]> {
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
-      const numCols = img.naturalWidth / MOB_SIZE;
-      const frameW = MOB_SIZE;
-      const frameH = img.naturalHeight / 4;
+      const frameW = img.naturalWidth / 8;   // source frame width  (512/8 = 64)
+      const frameH = img.naturalHeight / 4;  // source frame height (256/4 = 64)
+      const numCols = 8;
       const rows: HTMLCanvasElement[][] = [];
       for (let row = 0; row < 4; row++) {
         const cols: HTMLCanvasElement[] = [];
@@ -438,7 +443,7 @@ function updateMobState(state: MobState, mob: PlacedMob, ts: number): MobState {
 
   if (moving) {
     if (ts - lastAnimTick >= ANIM_INTERVAL) {
-      frame = (frame + 1) % 2;
+      frame = (frame + 1) % 8;
       lastAnimTick = ts;
     }
   } else {
@@ -2856,8 +2861,8 @@ function MobThumb({ spritesheet }: { spritesheet: string }) {
       ctx.clearRect(0, 0, 40, 40);
       const sheet = imgRef.current;
       if (sheet && sheet.complete && sheet.naturalWidth > 0) {
-        const fw = sheet.width / 8;
-        const fh = sheet.height / 4;
+        const fw = sheet.naturalWidth / 8;
+        const fh = sheet.naturalHeight / 4;
         ctx.drawImage(sheet, frameRef.current * fw, 0 * fh, fw, fh, 0, 0, 40, 40);
       }
       rafRef.current = requestAnimationFrame(animate);

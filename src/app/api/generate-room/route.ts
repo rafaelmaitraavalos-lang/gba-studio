@@ -139,6 +139,8 @@ export async function POST(req: NextRequest) {
   let imageBase64: string | null = null;
   const pixellabKey = process.env.PIXELLAB_API_KEY;
 
+  console.log("[generate-room] pixellabKey present:", !!pixellabKey);
+
   // PixelLab primary
   if (pixellabKey) {
     try {
@@ -155,8 +157,9 @@ export async function POST(req: NextRequest) {
       );
       const data = (await res.json()) as { image: PlImage };
       imageBase64 = `data:image/png;base64,${data.image.base64}`;
+      console.log("[generate-room] PixelLab Pixflux succeeded");
     } catch (err) {
-      console.warn("[generate-room] PixelLab failed, falling back to Replicate:", (err as Error).message);
+      console.log("[generate-room] PixelLab failed, falling back to Replicate:", (err as Error).message);
     }
   }
 
