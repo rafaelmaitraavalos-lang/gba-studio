@@ -967,15 +967,23 @@ export default function BuilderMode() {
     const char = characters.find((c) => c.id === activeId);
     if (!char) return;
     charFrameCacheRef.current.clear();
-    const layersToRender = char.equippedSpritesheetUrl
-      ? [{ id: "equipped", name: "equipped", spritesheet: char.equippedSpritesheetUrl, zIndex: 0 }]
-      : char.character.layers;
+
+    // Explicit priority: equippedSpritesheetUrl > V2 spritesheetUrl > legacy layers > rotationUrls static fallback
+    let layersToRender: CharacterLayer[];
+    if (char.equippedSpritesheetUrl) {
+      layersToRender = [{ id: "equipped", name: "equipped", spritesheet: char.equippedSpritesheetUrl, zIndex: 0 }];
+    } else if (char.spritesheetUrl) {
+      layersToRender = [{ id: "v2_walk", name: "base", spritesheet: char.spritesheetUrl, zIndex: 0 }];
+    } else {
+      layersToRender = char.character.layers;
+    }
+
     if (layersToRender.length > 0) {
       preRenderCompositeFrames(layersToRender).then((cache) => {
         charFrameCacheRef.current = cache;
       });
     } else if (char.rotationUrls) {
-      // V2 idle-only: build a static 4-direction fake spritesheet from rotation images
+      // V2 idle-only: no walk cycle yet — build a static 4-direction fake spritesheet
       buildFakeSpritesheetFromRotations(char.rotationUrls).then((fakeSpritesheet) => {
         const fakeLayer = { id: "v2_idle", name: "base", spritesheet: fakeSpritesheet, zIndex: 0 };
         preRenderCompositeFrames([fakeLayer]).then((cache) => {
