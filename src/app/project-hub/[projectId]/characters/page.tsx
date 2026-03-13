@@ -12,6 +12,56 @@ import {
 } from "firebase/firestore";
 import ProjectHubNav from "@/components/project-hub/ProjectHubNav";
 
+// ─── Loading messages (cycle every 8 s while waiting for animation) ───────────
+
+const LOADING_MESSAGES = [
+  "Stretching legs...",
+  "Lacing up boots...",
+  "Arguing with the animator...",
+  "Practicing walk in mirror...",
+  "Tripping over cape...",
+  "Doing warmups...",
+  "Just one more frame...",
+  "Negotiating salary...",
+  "Checking if anyone's watching...",
+  "Forgetting how legs work...",
+  "Googling 'how to walk'...",
+  "Left foot. Right foot. Left foot. Right—",
+  "Having an existential crisis...",
+  "Almost done (lying)...",
+  "Touching grass for reference...",
+  "Filing workers comp claim...",
+  "This is taking a while huh",
+  "Still here...",
+  "okay we might be cooked",
+  "jk jk... probably",
+  "asking the other characters for advice...",
+  "they said walk harder",
+  "considering a career change...",
+  "pixel therapy session in progress...",
+  "complaining about the lighting...",
+  "redoing the whole thing actually",
+  "just kidding. maybe.",
+  "checking horoscope before continuing...",
+  "mercury is in retrograde btw",
+  "blaming the intern...",
+  "there is no intern",
+  "manifesting good frames...",
+  "frame 7 looks kinda raw ngl",
+  "okay frame 7 was not it",
+  "taking a snack break",
+  "back. did you miss me",
+  "the animator went to the bathroom",
+  "we don't talk about frame 3",
+  "almost. no wait.",
+  "bro where are the legs",
+  "found them",
+  "okay THIS is the last frame",
+  "it's giving... something",
+  "chat is this walk cycle fire or nah",
+  "W animation incoming (allegedly)",
+];
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface RotationUrls {
@@ -301,6 +351,47 @@ export default function CharactersPage() {
     }
   }, [animatingId, user, projectId]);
 
+  // ── Auto-poll + message cycling for "animating" characters ───────────────────
+  const [messageIndex, setMessageIndex] = useState(0);
+
+  useEffect(() => {
+    const animating = savedChars.filter(
+      (c) => c.animationStatus === "animating" && c.pixellabCharacterId && !c.spritesheetUrl,
+    );
+    if (animating.length === 0 || !user) return;
+
+    const interval = setInterval(async () => {
+      setMessageIndex((i) => i + 1);
+
+      for (const char of animating) {
+        try {
+          const res = await fetch(
+            `/api/check-character-animation?character_id=${encodeURIComponent(char.pixellabCharacterId!)}`,
+          );
+          const data = await res.json() as { complete?: boolean; spritesheetUrl?: string };
+          if (data.complete && data.spritesheetUrl) {
+            const db = getFirebaseDb();
+            await updateDoc(
+              doc(db, "users", user.uid, "projects", projectId, "characters", char.id),
+              { spritesheetUrl: data.spritesheetUrl, animationStatus: null, updatedAt: serverTimestamp() },
+            );
+            setSavedChars((prev) =>
+              prev.map((c) =>
+                c.id === char.id
+                  ? { ...c, spritesheetUrl: data.spritesheetUrl, animationStatus: undefined }
+                  : c,
+              ),
+            );
+          }
+        } catch (err) {
+          console.warn(`[auto-poll] check failed for ${char.id}:`, err);
+        }
+      }
+    }, 8000);
+
+    return () => clearInterval(interval);
+  }, [savedChars, user, projectId]);
+
   // ── Check if PixelLab animation finished (for "animating" characters) ────────
   const [checkingId, setCheckingId] = useState<string | null>(null);
 
@@ -479,21 +570,35 @@ export default function CharactersPage() {
                       {char.name}
                     </p>
 
-                    {/* Animate walk / Check status — only for V2 characters without a spritesheet yet */}
+                    {/* Animate walk / auto-polling state / Check status */}
                     {char.pixellabCharacterId && !char.spritesheetUrl && (
                       char.animationStatus === "animating" ? (
-                        <button
-                          onClick={() => handleCheckStatus(char)}
-                          disabled={!!checkingId}
-                          className="mt-2 w-full rounded-lg bg-amber-100 px-2 py-1 text-[10px] font-semibold text-amber-700 hover:bg-amber-500 hover:text-white disabled:opacity-50 transition-colors"
-                        >
-                          {checkingId === char.id ? (
-                            <span className="flex items-center justify-center gap-1">
-                              <span className="h-3 w-3 animate-spin rounded-full border border-amber-400 border-t-transparent" />
-                              Checking…
+                        <div className="mt-2 w-full flex flex-col items-center gap-1.5">
+                          {/* Pulsing amber badge */}
+                          <div className="flex items-center gap-1">
+                            <span className="h-2 w-2 rounded-full bg-amber-400 animate-pulse" />
+                            <span className="text-[9px] font-bold uppercase tracking-wide text-amber-600">
+                              Animating
                             </span>
-                          ) : "Check Status"}
-                        </button>
+                          </div>
+                          {/* Cycling loading message */}
+                          <p className="min-h-[28px] w-full text-center text-[8px] leading-snug text-gray-400 px-1">
+                            {LOADING_MESSAGES[messageIndex % LOADING_MESSAGES.length]}
+                          </p>
+                          {/* Manual check button */}
+                          <button
+                            onClick={() => handleCheckStatus(char)}
+                            disabled={!!checkingId}
+                            className="w-full rounded-lg bg-amber-100 px-2 py-1 text-[10px] font-semibold text-amber-700 hover:bg-amber-500 hover:text-white disabled:opacity-50 transition-colors"
+                          >
+                            {checkingId === char.id ? (
+                              <span className="flex items-center justify-center gap-1">
+                                <span className="h-3 w-3 animate-spin rounded-full border border-amber-400 border-t-transparent" />
+                                Checking…
+                              </span>
+                            ) : "Check Status"}
+                          </button>
+                        </div>
                       ) : (
                         <button
                           onClick={() => handleAnimate(char)}
