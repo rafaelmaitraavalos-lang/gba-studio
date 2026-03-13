@@ -28,6 +28,7 @@ interface SavedChar {
   pixellabCharacterId?: string;
   rotationUrls?: RotationUrls;  // base64 data URIs for 4 directions
   spritesheetUrl?: string;      // walk cycle spritesheet
+  animationStatus?: "animating"; // set when animate job fired but timed out / failed
   // Legacy support
   layers?: { spritesheet: string }[];
 }
@@ -140,6 +141,7 @@ export default function CharactersPage() {
           pixellabCharacterId:   (data.pixellabCharacterId as string | undefined),
           rotationUrls:          (data.rotationUrls as RotationUrls | undefined),
           spritesheetUrl:        (data.spritesheetUrl as string | undefined),
+          animationStatus:       (data.animationStatus as "animating" | undefined),
           layers:                (data.layers as { spritesheet: string }[] | undefined),
         };
       });
@@ -253,24 +255,90 @@ export default function CharactersPage() {
       });
       const data = await res.json() as { spritesheetUrl?: string; error?: string };
       if (!res.ok || !data.spritesheetUrl) {
-        setAnimateError(data.error ?? "Animation failed");
+        // Job may still be running on PixelLab's side — mark as "animating"
+        // so the user can check status later
+        const db = getFirebaseDb();
+        await updateDoc(
+          doc(db, "users", user!.uid, "projects", projectId, "characters", char.id),
+          { animationStatus: "animating", updatedAt: serverTimestamp() },
+        );
+        setSavedChars((prev) =>
+          prev.map((c) => c.id === char.id ? { ...c, animationStatus: "animating" } : c),
+        );
+        setAnimateError(
+          (data.error ?? "Animation timed out") +
+          " — the job may still be running. Use \"Check Status\" to retrieve it.",
+        );
         return;
       }
-      // Update Firestore
+      // Success: save spritesheet and clear animation status
       const db = getFirebaseDb();
       await updateDoc(
         doc(db, "users", user!.uid, "projects", projectId, "characters", char.id),
-        { spritesheetUrl: data.spritesheetUrl, updatedAt: serverTimestamp() },
+        { spritesheetUrl: data.spritesheetUrl, animationStatus: null, updatedAt: serverTimestamp() },
       );
       setSavedChars((prev) =>
-        prev.map((c) => c.id === char.id ? { ...c, spritesheetUrl: data.spritesheetUrl } : c),
+        prev.map((c) =>
+          c.id === char.id ? { ...c, spritesheetUrl: data.spritesheetUrl, animationStatus: undefined } : c,
+        ),
       );
     } catch (err) {
-      setAnimateError((err as Error).message);
+      // Network / server error — mark animating so user can check later
+      const db = getFirebaseDb();
+      await updateDoc(
+        doc(db, "users", user!.uid, "projects", projectId, "characters", char.id),
+        { animationStatus: "animating", updatedAt: serverTimestamp() },
+      ).catch(() => {});
+      setSavedChars((prev) =>
+        prev.map((c) => c.id === char.id ? { ...c, animationStatus: "animating" } : c),
+      );
+      setAnimateError(
+        (err as Error).message +
+        " — use \"Check Status\" to retrieve the result if the job completed.",
+      );
     } finally {
       setAnimatingId(null);
     }
   }, [animatingId, user, projectId]);
+
+  // ── Check if PixelLab animation finished (for "animating" characters) ────────
+  const [checkingId, setCheckingId] = useState<string | null>(null);
+
+  const handleCheckStatus = useCallback(async (char: SavedChar) => {
+    if (!char.pixellabCharacterId || checkingId) return;
+    setCheckingId(char.id);
+    setAnimateError(null);
+    try {
+      const res = await fetch(
+        `/api/check-character-animation?character_id=${encodeURIComponent(char.pixellabCharacterId)}`,
+      );
+      const data = await res.json() as { complete?: boolean; spritesheetUrl?: string; error?: string };
+      if (!res.ok) {
+        setAnimateError(data.error ?? "Check failed");
+        return;
+      }
+      if (data.complete && data.spritesheetUrl) {
+        const db = getFirebaseDb();
+        await updateDoc(
+          doc(db, "users", user!.uid, "projects", projectId, "characters", char.id),
+          { spritesheetUrl: data.spritesheetUrl, animationStatus: null, updatedAt: serverTimestamp() },
+        );
+        setSavedChars((prev) =>
+          prev.map((c) =>
+            c.id === char.id
+              ? { ...c, spritesheetUrl: data.spritesheetUrl, animationStatus: undefined }
+              : c,
+          ),
+        );
+      } else {
+        setAnimateError("Animation not ready yet — try again in a moment.");
+      }
+    } catch (err) {
+      setAnimateError((err as Error).message);
+    } finally {
+      setCheckingId(null);
+    }
+  }, [checkingId, user, projectId]);
 
   // ── Delete character ──────────────────────────────────────────────────────
   const handleDelete = useCallback(async (charId: string) => {
@@ -411,20 +479,35 @@ export default function CharactersPage() {
                       {char.name}
                     </p>
 
-                    {/* Animate walk button — only for V2 characters without a spritesheet yet */}
+                    {/* Animate walk / Check status — only for V2 characters without a spritesheet yet */}
                     {char.pixellabCharacterId && !char.spritesheetUrl && (
-                      <button
-                        onClick={() => handleAnimate(char)}
-                        disabled={!!animatingId}
-                        className="mt-2 w-full rounded-lg bg-indigo-100 px-2 py-1 text-[10px] font-semibold text-indigo-700 hover:bg-indigo-600 hover:text-white disabled:opacity-50 transition-colors"
-                      >
-                        {animatingId === char.id ? (
-                          <span className="flex items-center justify-center gap-1">
-                            <span className="h-3 w-3 animate-spin rounded-full border border-indigo-400 border-t-transparent" />
-                            Animating…
-                          </span>
-                        ) : "Animate Walk"}
-                      </button>
+                      char.animationStatus === "animating" ? (
+                        <button
+                          onClick={() => handleCheckStatus(char)}
+                          disabled={!!checkingId}
+                          className="mt-2 w-full rounded-lg bg-amber-100 px-2 py-1 text-[10px] font-semibold text-amber-700 hover:bg-amber-500 hover:text-white disabled:opacity-50 transition-colors"
+                        >
+                          {checkingId === char.id ? (
+                            <span className="flex items-center justify-center gap-1">
+                              <span className="h-3 w-3 animate-spin rounded-full border border-amber-400 border-t-transparent" />
+                              Checking…
+                            </span>
+                          ) : "Check Status"}
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => handleAnimate(char)}
+                          disabled={!!animatingId}
+                          className="mt-2 w-full rounded-lg bg-indigo-100 px-2 py-1 text-[10px] font-semibold text-indigo-700 hover:bg-indigo-600 hover:text-white disabled:opacity-50 transition-colors"
+                        >
+                          {animatingId === char.id ? (
+                            <span className="flex items-center justify-center gap-1">
+                              <span className="h-3 w-3 animate-spin rounded-full border border-indigo-400 border-t-transparent" />
+                              Animating…
+                            </span>
+                          ) : "Animate Walk"}
+                        </button>
+                      )
                     )}
 
                     {char.spritesheetUrl && (
