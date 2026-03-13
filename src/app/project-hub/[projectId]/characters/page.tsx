@@ -1,617 +1,452 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/lib/auth-context";
 import { useProject } from "@/lib/project-context";
 import { getFirebaseDb } from "@/lib/firebase";
-import { collection, addDoc, getDocs, deleteDoc, doc, setDoc, serverTimestamp } from "firebase/firestore";
-import ProjectHubNav from "@/components/project-hub/ProjectHubNav";
 import {
-  GRID_SIZE,
-  FRAME_ANIMATION_DELAY,
-  type Direction,
-  type FrameIndex,
-  type CharacterLayer,
-  type LayeredCharacter,
-  createEmptyLayeredCharacter,
-} from "@/lib/characters";
+  collection, addDoc, getDocs, deleteDoc, doc,
+  updateDoc, serverTimestamp,
+} from "firebase/firestore";
+import ProjectHubNav from "@/components/project-hub/ProjectHubNav";
 
-const DIRECTIONS: Direction[] = ["down", "up", "left", "right"];
-const DIRECTION_LABELS: Record<Direction, string> = {
-  down: "Down",
-  up: "Up",
-  left: "Left",
-  right: "Right",
-};
-const DIRECTION_ARROWS: Record<Direction, string> = {
-  down: "v",
-  up: "^",
-  left: "<",
-  right: ">",
-};
+// ─── Types ────────────────────────────────────────────────────────────────────
 
-const DIRECTION_TO_ROW: Record<Direction, number> = {
-  down: 0,
-  left: 1,
-  right: 2,
-  up: 3,
-};
-
-type ParsedFrameCache = Map<string, HTMLCanvasElement[][]>;
-
-function parseSpritesheetToCanvases(
-  dataUri: string
-): Promise<HTMLCanvasElement[][]> {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => {
-      const srcCanvas = document.createElement("canvas");
-      srcCanvas.width = img.naturalWidth;
-      srcCanvas.height = img.naturalHeight;
-      const srcCtx = srcCanvas.getContext("2d")!;
-      srcCtx.imageSmoothingEnabled = false;
-      srcCtx.drawImage(img, 0, 0);
-
-      const numCols = img.naturalWidth / GRID_SIZE;
-      const frameW = GRID_SIZE;
-      const frameH = img.naturalHeight / 4;
-      console.log(`[parseSpritesheetToCanvases] naturalSize=${img.naturalWidth}x${img.naturalHeight} frameW=${frameW} frameH=${frameH} numCols=${numCols}`);
-
-      const rows: HTMLCanvasElement[][] = [];
-      for (let row = 0; row < 4; row++) {
-        const frameCols: HTMLCanvasElement[] = [];
-        for (let col = 0; col < numCols; col++) {
-          const c = document.createElement("canvas");
-          c.width = GRID_SIZE;
-          c.height = GRID_SIZE;
-          const ctx = c.getContext("2d")!;
-          ctx.imageSmoothingEnabled = false;
-          ctx.drawImage(
-            srcCanvas,
-            col * frameW, row * frameH, frameW, frameH,
-            0, 0, GRID_SIZE, GRID_SIZE
-          );
-          frameCols.push(c);
-        }
-        rows.push(frameCols);
-      }
-      resolve(rows);
-    };
-    img.onerror = () => reject(new Error("Failed to load spritesheet"));
-    img.src = dataUri;
-  });
+interface RotationUrls {
+  south: string;
+  west:  string;
+  east:  string;
+  north: string;
 }
 
-/** Convert legacy character doc (with frames but no layers) into a layers array */
-function deserializeLayers(data: Record<string, unknown>): CharacterLayer[] {
-  // New format: layers array
-  const rawLayers = data.layers as CharacterLayer[] | undefined;
-  if (rawLayers && rawLayers.length > 0) return rawLayers;
+interface SavedChar {
+  id: string;
+  name: string;
+  description: string;
+  pixellabCharacterId?: string;
+  rotationUrls?: RotationUrls;  // base64 data URIs for 4 directions
+  spritesheetUrl?: string;      // walk cycle spritesheet
+  // Legacy support
+  layers?: { spritesheet: string }[];
+}
 
-  // Legacy format: spritesheet field
-  const legacySpritesheet = data.spritesheet as string | undefined;
-  if (legacySpritesheet) {
-    return [{
-      id: "legacy_base",
-      name: "base",
-      spritesheet: legacySpritesheet,
-      zIndex: 0,
-    }];
+// ─── Section label ────────────────────────────────────────────────────────────
+
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="mb-5 flex items-center gap-3">
+      <div className="h-px flex-1 bg-gray-200" />
+      <span className="text-[11px] font-bold uppercase tracking-widest text-gray-400">
+        {children}
+      </span>
+      <div className="h-px flex-1 bg-gray-200" />
+    </div>
+  );
+}
+
+// ─── Character thumbnail ──────────────────────────────────────────────────────
+
+/** Shows south idle image (V2) or first frame of spritesheet (legacy). */
+function CharThumb({ char, size = 80 }: { char: SavedChar; size?: number }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  // V2: show south rotation image directly
+  if (char.rotationUrls?.south) {
+    const src = char.rotationUrls.south.startsWith("data:")
+      ? char.rotationUrls.south
+      : `data:image/png;base64,${char.rotationUrls.south}`;
+    return (
+      <img
+        src={src}
+        alt={char.name}
+        style={{ width: size, height: size, imageRendering: "pixelated", display: "block" }}
+        className="rounded"
+      />
+    );
   }
 
-  return [];
+  // Legacy: extract first frame from spritesheet via canvas
+  const spritesheetUrl = char.spritesheetUrl ?? char.layers?.[0]?.spritesheet;
+  useEffect(() => {
+    if (!spritesheetUrl) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const img = new Image();
+    img.crossOrigin = "anonymous";
+    img.onload = () => {
+      ctx.imageSmoothingEnabled = false;
+      ctx.clearRect(0, 0, size, size);
+      const fh = img.naturalHeight / 4;
+      const fw = fh;
+      ctx.drawImage(img, 0, 0, fw, fh, 0, 0, size, size);
+    };
+    img.src = spritesheetUrl;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [spritesheetUrl, size]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      width={size}
+      height={size}
+      style={{ width: size, height: size, imageRendering: "pixelated", display: "block" }}
+      className="rounded"
+    />
+  );
 }
 
-export default function CharacterCreator() {
+// ─── Page ─────────────────────────────────────────────────────────────────────
+
+export default function CharactersPage() {
   const { user, loading } = useAuth();
   const { projectId } = useProject();
   const router = useRouter();
 
-  const [character, setCharacter] = useState<LayeredCharacter>(createEmptyLayeredCharacter);
-  const [currentDirection, setCurrentDirection] = useState<Direction>("down");
-  const [characterId, setCharacterId] = useState<string | null>(null);
-  const [saveStatus, setSaveStatus] = useState<"idle" | "saving" | "saved">("idle");
+  // ── Saved characters ──────────────────────────────────────────────────────
+  const [savedChars, setSavedChars]         = useState<SavedChar[]>([]);
+  const [animatingId, setAnimatingId]       = useState<string | null>(null);  // card-level spinner
+  const [animateError, setAnimateError]     = useState<string | null>(null);
 
-  // AI generation state
-  const [showAiModal, setShowAiModal] = useState(false);
-  const [aiPrompt, setAiPrompt] = useState("");
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [generatedPreview, setGeneratedPreview] = useState<string | null>(null);
-  const [genError, setGenError] = useState<string | null>(null);
+  // ── Generate new character form ───────────────────────────────────────────
+  const [description, setDescription]       = useState("");
+  const [charName, setCharName]             = useState("New Character");
+  const [isGenerating, setIsGenerating]     = useState(false);
+  const [genError, setGenError]             = useState<string | null>(null);
+  const [genResult, setGenResult]           = useState<{ character_id: string } & RotationUrls | null>(null);
+  const [isSaving, setIsSaving]             = useState(false);
 
-  // Saved characters
-  const [savedChars, setSavedChars] = useState<{ id: string; name: string; layers: CharacterLayer[] }[]>([]);
-
-  // Scroll state
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [canScrollLeft, setCanScrollLeft] = useState(false);
-  const [canScrollRight, setCanScrollRight] = useState(false);
-
-  const previewCanvasRef = useRef<HTMLCanvasElement>(null);
-  const animFrameRef = useRef<FrameIndex>(0);
-  const parsedCacheRef = useRef<ParsedFrameCache>(new Map());
+  const [elapsed, setElapsed]               = useState(0);
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     if (!loading && !user) router.replace("/login");
   }, [loading, user, router]);
 
-  // Update scroll arrow visibility
-  const updateScrollState = useCallback(() => {
-    const el = scrollRef.current;
-    if (!el) return;
-    setCanScrollLeft(el.scrollLeft > 0);
-    setCanScrollRight(el.scrollLeft + el.clientWidth < el.scrollWidth - 1);
-  }, []);
-
-  // Load saved characters from Firebase
+  // Load saved characters
   useEffect(() => {
     if (!user || !projectId) return;
     const db = getFirebaseDb();
-    getDocs(collection(db, "users", user.uid, "projects", projectId, "characters")).then(
-      (snapshot) => {
-        const chars: { id: string; name: string; layers: CharacterLayer[] }[] = [];
-        snapshot.forEach((d) => {
-          const data = d.data() as Record<string, unknown>;
-          const layers = deserializeLayers(data);
-          chars.push({ id: d.id, name: (data.name as string) ?? "Character", layers });
-        });
-        setSavedChars(chars);
-        if (chars.length > 0 && !characterId) {
-          const first = chars[0];
-          setCharacterId(first.id);
-          setCharacter({ name: first.name, layers: first.layers });
-        }
-      }
-    );
+    getDocs(collection(db, "users", user.uid, "projects", projectId, "characters")).then((snap) => {
+      const chars: SavedChar[] = snap.docs.map((d) => {
+        const data = d.data() as Record<string, unknown>;
+        return {
+          id:                    d.id,
+          name:                  (data.name        as string | undefined) ?? "Character",
+          description:           (data.description as string | undefined) ?? (data.prompt as string | undefined) ?? "",
+          pixellabCharacterId:   (data.pixellabCharacterId as string | undefined),
+          rotationUrls:          (data.rotationUrls as RotationUrls | undefined),
+          spritesheetUrl:        (data.spritesheetUrl as string | undefined),
+          layers:                (data.layers as { spritesheet: string }[] | undefined),
+        };
+      });
+      setSavedChars(chars);
+    });
   }, [user, projectId]);
 
-  // Recheck scroll arrows when saved chars change
-  useEffect(() => {
-    // Delay to let DOM render
-    const t = setTimeout(updateScrollState, 50);
-    return () => clearTimeout(t);
-  }, [savedChars, updateScrollState]);
+  function startTimer() {
+    setElapsed(0);
+    timerRef.current = setInterval(() => setElapsed((s) => s + 1), 1000);
+  }
+  function stopTimer() {
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+  }
+  function fmtTime(s: number) {
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  }
 
-  // Parse base layer spritesheet into canvas cache
-  const refreshCache = useCallback(async (layers: CharacterLayer[]) => {
-    const cache: ParsedFrameCache = new Map();
-    for (const layer of layers) {
-      if (!layer.spritesheet) continue;
-      try {
-        const parsed = await parseSpritesheetToCanvases(layer.spritesheet);
-        cache.set(layer.id, parsed);
-      } catch (err) {
-        console.warn(`Failed to parse layer ${layer.name}:`, err);
-      }
-    }
-    parsedCacheRef.current = cache;
-  }, []);
-
-  useEffect(() => {
-    refreshCache(character.layers);
-  }, [character.layers, refreshCache]);
-
-  // Draw frame from base layer
-  const drawFrame = useCallback(
-    (ctx: CanvasRenderingContext2D, direction: Direction, frameIdx: FrameIndex) => {
-      ctx.clearRect(0, 0, GRID_SIZE, GRID_SIZE);
-      const rowIdx = DIRECTION_TO_ROW[direction];
-
-      for (const layer of character.layers) {
-        const parsed = parsedCacheRef.current.get(layer.id);
-        if (!parsed || !parsed[rowIdx] || !parsed[rowIdx][frameIdx]) continue;
-        ctx.drawImage(parsed[rowIdx][frameIdx], 0, 0);
-      }
-    },
-    [character.layers]
-  );
-
-  // Animation preview
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const firstLayer = character.layers[0];
-      const numFrames = firstLayer
-        ? (parsedCacheRef.current.get(firstLayer.id)?.[0]?.length ?? 8)
-        : 8;
-      animFrameRef.current = ((animFrameRef.current + 1) % numFrames) as FrameIndex;
-      const canvas = previewCanvasRef.current;
-      if (!canvas) return;
-      const ctx = canvas.getContext("2d");
-      if (!ctx) return;
-      ctx.imageSmoothingEnabled = false;
-      drawFrame(ctx, currentDirection, animFrameRef.current);
-    }, FRAME_ANIMATION_DELAY);
-    return () => clearInterval(interval);
-  }, [currentDirection, drawFrame]);
-
-  const hasBase = character.layers.some((l) => l.name === "base");
-
-  // AI Generate — always base
+  // ── Generate character ──────────────────────────────────────────────────────
   const handleGenerate = useCallback(async () => {
-    if (!aiPrompt.trim() || isGenerating) return;
+    if (!description.trim() || isGenerating) return;
     setIsGenerating(true);
     setGenError(null);
-    setGeneratedPreview(null);
+    setGenResult(null);
+    startTimer();
     try {
-      const res = await fetch("/api/generate-sprite", {
+      const res = await fetch("/api/create-character", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt: aiPrompt.trim(), type: "character" }),
+        body: JSON.stringify({ description: description.trim() }),
       });
-      const data = await res.json();
-      if (!res.ok) {
+      const data = await res.json() as {
+        character_id?: string; south?: string; west?: string; east?: string; north?: string; error?: string;
+      };
+      if (!res.ok || !data.character_id || !data.south) {
         setGenError(data.error ?? "Generation failed");
         return;
       }
-      setGeneratedPreview(data.image);
+      setGenResult({
+        character_id: data.character_id,
+        south: data.south,
+        west:  data.west!,
+        east:  data.east!,
+        north: data.north!,
+      });
     } catch {
-      setGenError("Failed to generate");
+      setGenError("Failed to generate character");
     } finally {
+      stopTimer();
       setIsGenerating(false);
     }
-  }, [aiPrompt, isGenerating]);
+  }, [description, isGenerating]);
 
-  const handleAcceptGenerated = useCallback(async () => {
-    if (!generatedPreview) return;
-    try {
-      const newLayer: CharacterLayer = {
-        id: `layer_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-        name: "base",
-        spritesheet: generatedPreview,
-        zIndex: 0,
-      };
-
-      setCharacter((prev) => ({
-        ...prev,
-        layers: [newLayer],
-      }));
-
-      setShowAiModal(false);
-      setGeneratedPreview(null);
-      setAiPrompt("");
-    } catch {
-      setGenError("Failed to set character");
-    }
-  }, [generatedPreview]);
-
+  // ── Save generated character ────────────────────────────────────────────────
   const handleSave = useCallback(async () => {
-    if (!user) return;
-    setSaveStatus("saving");
+    if (!user || !genResult || isSaving) return;
+    setIsSaving(true);
     try {
       const db = getFirebaseDb();
-      const data = {
-        name: character.name,
-        layers: character.layers.map((l) => ({
-          id: l.id,
-          name: l.name,
-          spritesheet: l.spritesheet,
-          zIndex: l.zIndex,
-        })),
-        updatedAt: serverTimestamp(),
+      const docRef = await addDoc(
+        collection(db, "users", user.uid, "projects", projectId, "characters"),
+        {
+          name:                 charName.trim() || "Character",
+          description:          description.trim(),
+          pixellabCharacterId:  genResult.character_id,
+          rotationUrls: {
+            south: genResult.south,
+            west:  genResult.west,
+            east:  genResult.east,
+            north: genResult.north,
+          },
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        },
+      );
+      const newChar: SavedChar = {
+        id:                   docRef.id,
+        name:                 charName.trim() || "Character",
+        description:          description.trim(),
+        pixellabCharacterId:  genResult.character_id,
+        rotationUrls: {
+          south: genResult.south,
+          west:  genResult.west,
+          east:  genResult.east,
+          north: genResult.north,
+        },
       };
-      let savedId = characterId;
-      if (characterId) {
-        await setDoc(
-          doc(db, "users", user.uid, "projects", projectId, "characters", characterId),
-          data,
-          { merge: true }
-        );
-      } else {
-        const docRef = await addDoc(
-          collection(db, "users", user.uid, "projects", projectId, "characters"),
-          { ...data, createdAt: serverTimestamp() }
-        );
-        savedId = docRef.id;
-        setCharacterId(docRef.id);
-      }
-      setSavedChars((prev) => {
-        const existing = prev.findIndex((c) => c.id === savedId);
-        const entry = { id: savedId!, name: character.name, layers: character.layers };
-        if (existing >= 0) {
-          const updated = [...prev];
-          updated[existing] = entry;
-          return updated;
-        }
-        return [...prev, entry];
-      });
-
-      setSaveStatus("saved");
-      setTimeout(() => setSaveStatus("idle"), 1500);
+      setSavedChars((prev) => [newChar, ...prev]);
+      // Reset form
+      setGenResult(null);
+      setDescription("");
+      setCharName("New Character");
     } catch (err) {
       console.error("Save failed:", err);
-      setSaveStatus("idle");
+      setGenError("Failed to save character");
+    } finally {
+      setIsSaving(false);
     }
-  }, [user, projectId, character, characterId]);
+  }, [user, projectId, genResult, charName, description, isSaving]);
 
-  const handleDeleteChar = useCallback(async (charId: string) => {
-    if (!user || !window.confirm("Are you sure you want to delete this character?")) return;
+  // ── Animate walk cycle for a saved character ────────────────────────────────
+  const handleAnimate = useCallback(async (char: SavedChar) => {
+    if (!char.pixellabCharacterId || animatingId) return;
+    setAnimatingId(char.id);
+    setAnimateError(null);
+    try {
+      const res = await fetch("/api/animate-character", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ character_id: char.pixellabCharacterId }),
+      });
+      const data = await res.json() as { spritesheetUrl?: string; error?: string };
+      if (!res.ok || !data.spritesheetUrl) {
+        setAnimateError(data.error ?? "Animation failed");
+        return;
+      }
+      // Update Firestore
+      const db = getFirebaseDb();
+      await updateDoc(
+        doc(db, "users", user!.uid, "projects", projectId, "characters", char.id),
+        { spritesheetUrl: data.spritesheetUrl, updatedAt: serverTimestamp() },
+      );
+      setSavedChars((prev) =>
+        prev.map((c) => c.id === char.id ? { ...c, spritesheetUrl: data.spritesheetUrl } : c),
+      );
+    } catch (err) {
+      setAnimateError((err as Error).message);
+    } finally {
+      setAnimatingId(null);
+    }
+  }, [animatingId, user, projectId]);
+
+  // ── Delete character ──────────────────────────────────────────────────────
+  const handleDelete = useCallback(async (charId: string) => {
+    if (!user || !window.confirm("Delete this character?")) return;
     try {
       const db = getFirebaseDb();
       await deleteDoc(doc(db, "users", user.uid, "projects", projectId, "characters", charId));
       setSavedChars((prev) => prev.filter((c) => c.id !== charId));
-      // If we deleted the active character, clear it
-      if (characterId === charId) {
-        setCharacterId(null);
-        setCharacter(createEmptyLayeredCharacter());
-      }
     } catch (err) {
       console.error("Delete failed:", err);
     }
-  }, [user, projectId, characterId]);
-
-  const handleNewCharacter = useCallback(() => {
-    setCharacterId(null);
-    setCharacter(createEmptyLayeredCharacter());
-  }, []);
-
-  const scrollBy = useCallback((delta: number) => {
-    const el = scrollRef.current;
-    if (!el) return;
-    el.scrollBy({ left: delta, behavior: "smooth" });
-  }, []);
+  }, [user, projectId]);
 
   if (loading || !user) {
     return (
       <div className="flex min-h-screen items-center justify-center">
-        <p className="text-gray-500">Loading...</p>
+        <p className="text-gray-500">Loading…</p>
       </div>
     );
   }
 
   return (
     <div className="flex min-h-screen flex-col">
-      <ProjectHubNav projectId={projectId} onSave={handleSave} saveStatus={saveStatus} />
+      <ProjectHubNav projectId={projectId} onSave={() => {}} saveStatus="idle" saveDisabled />
 
-      <div className="flex flex-1 flex-col items-center bg-gray-50 p-8">
-        {/* Character name */}
-        <input
-          type="text"
-          value={character.name}
-          maxLength={20}
-          onChange={(e) =>
-            setCharacter((prev) => ({ ...prev, name: e.target.value }))
-          }
-          className="mb-6 w-48 rounded border border-gray-300 px-3 py-1.5 text-center text-sm font-ahsing focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent"
-        />
+      <div className="flex flex-1 flex-col overflow-y-auto bg-gray-50">
+        <div className="mx-auto w-full max-w-3xl px-6 pt-8 pb-16">
 
-        {/* Animation preview */}
-        <div className="mb-6 flex flex-col items-center">
-          <h2 className="mb-3 text-xs font-bold uppercase tracking-wider text-gray-400">
-            Preview
-          </h2>
-          <canvas
-            ref={previewCanvasRef}
-            width={GRID_SIZE}
-            height={GRID_SIZE}
-            className="pixelated rounded-lg border-2 border-gray-300"
-            style={{ width: 256, height: 256 }}
-          />
-          <div className="mt-4 flex justify-center gap-2">
-            {DIRECTIONS.map((dir) => (
-              <button
-                key={dir}
-                onClick={() => setCurrentDirection(dir)}
-                className={`rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-                  currentDirection === dir
-                    ? "bg-accent text-white"
-                    : "bg-gray-100 text-gray-600 hover:bg-gray-200"
-                }`}
-              >
-                {DIRECTION_ARROWS[dir]} {DIRECTION_LABELS[dir]}
-              </button>
-            ))}
-          </div>
-        </div>
+          {/* ── Generate new character ── */}
+          <SectionLabel>Generate New Character</SectionLabel>
+          <div className="mb-10 mx-auto w-full max-w-[520px] rounded-2xl border border-gray-200 bg-white p-8 shadow-sm flex flex-col gap-5">
 
-        {/* Generate button */}
-        <button
-          onClick={() => setShowAiModal(true)}
-          className="mb-8 rounded-lg bg-purple-600 px-6 py-2.5 text-sm font-medium text-white hover:bg-purple-700 transition-colors"
-        >
-          {hasBase ? "Regenerate Character" : "Generate Base Character"}
-        </button>
-
-        {/* Saved characters */}
-        <div className="w-full max-w-xl">
-          <h2 className="mb-3 text-xs font-bold uppercase tracking-wider text-gray-400">
-            Characters ({savedChars.length})
-          </h2>
-          <div className="relative flex items-center">
-            {/* Left arrow */}
-            {canScrollLeft && (
-              <button
-                onClick={() => scrollBy(-200)}
-                className="absolute -left-4 z-10 flex h-[100px] w-8 items-center justify-center rounded-l-lg bg-white/90 border border-gray-200 text-gray-500 hover:text-gray-700 hover:bg-gray-50 shadow-sm"
-              >
-                &lsaquo;
-              </button>
-            )}
-
-            <div
-              ref={scrollRef}
-              onScroll={updateScrollState}
-              className="flex gap-3 overflow-x-auto pb-2 px-1 scrollbar-hide"
-              style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
-            >
-              {savedChars.map((sc) => (
-                <div
-                  key={sc.id}
-                  className={`relative flex-shrink-0 flex flex-col items-center rounded-lg border-2 bg-white p-3 transition-colors cursor-pointer ${
-                    characterId === sc.id
-                      ? "border-accent shadow-md"
-                      : "border-gray-200 hover:border-gray-300"
-                  }`}
-                  onClick={() => {
-                    setCharacterId(sc.id);
-                    setCharacter({ name: sc.name, layers: sc.layers });
-                  }}
-                >
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleDeleteChar(sc.id);
-                    }}
-                    className="absolute -top-1.5 -right-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-red-100 text-[10px] text-red-500 hover:bg-red-200 hover:text-red-700"
-                    title="Delete character"
-                  >
-                    &times;
-                  </button>
-                  <SavedCharThumbnail layers={sc.layers} />
-                  <span className="mt-2 text-xs font-ahsing text-gray-700 truncate w-16 text-center">
-                    {sc.name}
-                  </span>
-                  <Link
-                    href={`/project-hub/${projectId}/equip?characterId=${sc.id}`}
-                    onClick={(e) => e.stopPropagation()}
-                    className="mt-1 rounded bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent hover:bg-accent hover:text-white transition-colors"
-                  >
-                    Equip →
-                  </Link>
-                </div>
-              ))}
-
-              {/* New character card */}
-              <button
-                onClick={handleNewCharacter}
-                className={`flex-shrink-0 flex flex-col items-center justify-center rounded-lg border-2 border-dashed bg-white p-3 transition-colors w-[88px] h-[100px] ${
-                  characterId === null
-                    ? "border-accent text-accent"
-                    : "border-gray-300 text-gray-400 hover:border-gray-400 hover:text-gray-500"
-                }`}
-              >
-                <span className="text-2xl leading-none">+</span>
-                <span className="mt-1 text-[10px] font-medium">New</span>
-              </button>
+            <div className="flex flex-col gap-1">
+              <label className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                Description
+              </label>
+              <textarea
+                rows={3}
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                placeholder="e.g. knight with blue armor and red cape"
+                disabled={isGenerating}
+                className="resize-none rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-purple-400 disabled:opacity-50"
+              />
             </div>
-
-            {/* Right arrow */}
-            {canScrollRight && (
-              <button
-                onClick={() => scrollBy(200)}
-                className="absolute -right-4 z-10 flex h-[100px] w-8 items-center justify-center rounded-r-lg bg-white/90 border border-gray-200 text-gray-500 hover:text-gray-700 hover:bg-gray-50 shadow-sm"
-              >
-                &rsaquo;
-              </button>
-            )}
-          </div>
-        </div>
-      </div>
-
-      {/* AI Generate Modal */}
-      {showAiModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="w-[420px] rounded-xl bg-white p-6 shadow-xl">
-            <div className="mb-4 flex items-center justify-between">
-              <h2 className="text-lg font-semibold">Generate Character</h2>
-              <button
-                onClick={() => {
-                  setShowAiModal(false);
-                  setGeneratedPreview(null);
-                  setGenError(null);
-                  setAiPrompt("");
-                }}
-                className="text-gray-400 hover:text-gray-600"
-              >
-                &times;
-              </button>
-            </div>
-
-            <p className="mb-3 text-xs text-gray-500">
-              Describe your character. Examples: &quot;knight with blue armor&quot;, &quot;forest elf&quot;, &quot;red dragon&quot;
-            </p>
-
-            <textarea
-              rows={3}
-              placeholder="Describe your character..."
-              value={aiPrompt}
-              onChange={(e) => setAiPrompt(e.target.value)}
-              className="mb-3 w-full resize-none rounded border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-accent"
-              disabled={isGenerating}
-            />
 
             <button
               onClick={handleGenerate}
-              disabled={isGenerating || !aiPrompt.trim()}
-              className="mb-4 w-full rounded-lg bg-purple-600 px-3 py-2 text-sm font-medium text-white hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed"
+              disabled={isGenerating || !description.trim()}
+              className="rounded-xl bg-purple-600 py-3 text-sm font-medium text-white hover:bg-purple-700 disabled:cursor-not-allowed disabled:opacity-40 transition-colors"
             >
-              {isGenerating ? "Generating..." : "Generate"}
+              {isGenerating
+                ? `Generating… ${fmtTime(elapsed)}`
+                : "Generate Character"}
             </button>
 
-            {genError && (
-              <p className="mb-3 text-sm text-red-500">{genError}</p>
+            {isGenerating && (
+              <div className="flex flex-col items-center gap-2">
+                <div className="h-5 w-5 animate-spin rounded-full border-2 border-purple-200 border-t-purple-600" />
+                <p className="text-center text-xs text-gray-500">
+                  Creating 4-direction character with PixelLab…
+                </p>
+              </div>
             )}
 
-            {generatedPreview && (
-              <div className="space-y-3">
-                <div className="flex justify-center">
-                  <img
-                    src={generatedPreview}
-                    alt="Generated spritesheet"
-                    className="pixelated rounded border border-gray-300"
-                    style={{ width: 256, height: 256, imageRendering: "pixelated" }}
+            {genError && (
+              <p className="text-center text-sm text-red-500">{genError}</p>
+            )}
+
+            {/* Direction previews + save form */}
+            {genResult && !isGenerating && (
+              <div className="flex flex-col gap-4 rounded-xl border border-gray-100 bg-gray-50 p-4">
+                <p className="text-center text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                  Preview — 4 Directions
+                </p>
+                <div className="flex justify-center gap-4">
+                  {(["south", "west", "east", "north"] as const).map((dir) => (
+                    <div key={dir} className="flex flex-col items-center gap-1">
+                      <img
+                        src={genResult[dir]}
+                        alt={dir}
+                        style={{ width: 64, height: 64, imageRendering: "pixelated" }}
+                        className="rounded-md border border-gray-200"
+                      />
+                      <span className="text-[9px] font-semibold uppercase tracking-wide text-gray-400">{dir}</span>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex flex-col gap-1">
+                  <label className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                    Character Name
+                  </label>
+                  <input
+                    type="text"
+                    value={charName}
+                    maxLength={30}
+                    onChange={(e) => setCharName(e.target.value)}
+                    className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-purple-400"
                   />
                 </div>
-                <div className="flex gap-2">
-                  <button
-                    onClick={handleAcceptGenerated}
-                    className="flex-1 rounded-lg bg-green-600 px-3 py-2 text-sm font-medium text-white hover:bg-green-700"
-                  >
-                    Use This
-                  </button>
-                  <button
-                    onClick={() => setGeneratedPreview(null)}
-                    className="flex-1 rounded-lg bg-gray-100 px-3 py-2 text-sm font-medium text-gray-700 hover:bg-gray-200"
-                  >
-                    Try Again
-                  </button>
-                </div>
+
+                <button
+                  onClick={handleSave}
+                  disabled={isSaving}
+                  className="rounded-xl bg-green-600 py-2.5 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-60 transition-colors"
+                >
+                  {isSaving ? "Saving…" : "Save Character"}
+                </button>
               </div>
             )}
           </div>
+
+          {/* ── Saved characters grid ── */}
+          {savedChars.length > 0 && (
+            <>
+              <SectionLabel>Your Characters ({savedChars.length})</SectionLabel>
+              {animateError && (
+                <p className="mb-4 text-center text-sm text-red-500">{animateError}</p>
+              )}
+              <div className="flex flex-wrap justify-center gap-4">
+                {savedChars.map((char) => (
+                  <div
+                    key={char.id}
+                    className="relative flex flex-col items-center rounded-2xl border-2 border-gray-200 bg-white p-4 shadow-sm w-[140px]"
+                  >
+                    {/* Delete button */}
+                    <button
+                      onClick={() => handleDelete(char.id)}
+                      className="absolute -top-1.5 -right-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-red-100 text-[10px] text-red-500 hover:bg-red-200"
+                      title="Delete"
+                    >
+                      &times;
+                    </button>
+
+                    <CharThumb char={char} size={80} />
+                    <p className="mt-2 w-full truncate text-center text-[11px] font-ahsing text-gray-700">
+                      {char.name}
+                    </p>
+
+                    {/* Animate walk button — only for V2 characters without a spritesheet yet */}
+                    {char.pixellabCharacterId && !char.spritesheetUrl && (
+                      <button
+                        onClick={() => handleAnimate(char)}
+                        disabled={!!animatingId}
+                        className="mt-2 w-full rounded-lg bg-indigo-100 px-2 py-1 text-[10px] font-semibold text-indigo-700 hover:bg-indigo-600 hover:text-white disabled:opacity-50 transition-colors"
+                      >
+                        {animatingId === char.id ? (
+                          <span className="flex items-center justify-center gap-1">
+                            <span className="h-3 w-3 animate-spin rounded-full border border-indigo-400 border-t-transparent" />
+                            Animating…
+                          </span>
+                        ) : "Animate Walk"}
+                      </button>
+                    )}
+
+                    {char.spritesheetUrl && (
+                      <span className="mt-2 rounded-full bg-green-100 px-2 py-0.5 text-[9px] font-semibold text-green-600">
+                        Walk ready
+                      </span>
+                    )}
+
+                    <Link
+                      href={`/project-hub/${projectId}/equip?characterId=${char.id}`}
+                      className="mt-2 w-full rounded-lg bg-purple-100 px-2 py-1 text-center text-[10px] font-semibold text-purple-700 hover:bg-purple-600 hover:text-white transition-colors"
+                    >
+                      Equip →
+                    </Link>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+
         </div>
-      )}
+      </div>
     </div>
-  );
-}
-
-const DOWN_ROW = DIRECTION_TO_ROW["down"];
-
-function SavedCharThumbnail({ layers }: { layers: CharacterLayer[] }) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d");
-    if (!ctx) return;
-    ctx.imageSmoothingEnabled = false;
-    ctx.clearRect(0, 0, GRID_SIZE, GRID_SIZE);
-
-    for (const layer of layers) {
-      if (!layer.spritesheet) continue;
-      const img = new Image();
-      img.onload = () => {
-        const fw = img.width / 4;
-        const fh = img.height / 4;
-        ctx.drawImage(
-          img,
-          0, DOWN_ROW * fh, fw, fh,
-          0, 0, GRID_SIZE, GRID_SIZE
-        );
-      };
-      img.src = layer.spritesheet;
-    }
-  }, [layers]);
-
-  return (
-    <canvas
-      ref={canvasRef}
-      width={GRID_SIZE}
-      height={GRID_SIZE}
-      className="pixelated block rounded"
-      style={{ width: 64, height: 64 }}
-    />
   );
 }
