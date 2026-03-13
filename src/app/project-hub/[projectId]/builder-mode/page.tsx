@@ -46,6 +46,37 @@ interface SavedCharacter {
   id: string;
   name: string;
   character: LayeredCharacter;
+  equippedSpritesheetUrl?: string;
+  spritesheetUrl?: string;       // V2: walk-cycle spritesheet
+  rotationUrls?: { south: string; west: string; east: string; north: string }; // V2: idle poses
+}
+
+/**
+ * Build a 64×256 spritesheet (1 frame per direction) from V2 rotation images
+ * so the builder can render idle-only characters before animation is complete.
+ * Row order: south=0, west=1, east=2, north=3.
+ */
+async function buildFakeSpritesheetFromRotations(
+  rotations: { south: string; west: string; east: string; north: string },
+): Promise<string> {
+  const canvas = document.createElement("canvas");
+  canvas.width = 64;
+  canvas.height = 256;
+  const ctx = canvas.getContext("2d")!;
+  ctx.imageSmoothingEnabled = false;
+  const dirs = [rotations.south, rotations.west, rotations.east, rotations.north];
+  await Promise.all(
+    dirs.map(
+      (src, i) =>
+        new Promise<void>((resolve) => {
+          const img = new Image();
+          img.onload = () => { ctx.drawImage(img, 0, i * 64, 64, 64); resolve(); };
+          img.onerror = () => resolve(); // skip missing direction gracefully
+          img.src = src;
+        }),
+    ),
+  );
+  return canvas.toDataURL("image/png");
 }
 
 interface SavedObject {
@@ -686,13 +717,23 @@ export default function BuilderMode() {
     const db = getFirebaseDb();
     getDocs(collection(db, "users", user.uid, "projects", projectId, "characters")).then(async (snap) => {
       const chars: SavedCharacter[] = snap.docs.map((d) => {
-        const character = deserializeLayeredCharacter(d.data() as Record<string, unknown>);
-        return { id: d.id, name: character.name, character };
+        const data = d.data() as Record<string, unknown>;
+        const character = deserializeLayeredCharacter(data);
+        const equippedSpritesheetUrl = (data.equippedSpritesheetUrl as string | undefined);
+        const spritesheetUrl = (data.spritesheetUrl as string | undefined);
+        const rotationUrls = (data.rotationUrls as SavedCharacter["rotationUrls"] | undefined);
+        // V2 character with walk cycle: inject a fake layer so builder can render it
+        if (character.layers.length === 0 && spritesheetUrl) {
+          character.layers.push({ id: "v2_walk", name: "base", spritesheet: spritesheetUrl, zIndex: 0 });
+        }
+        return { id: d.id, name: character.name, character, equippedSpritesheetUrl, spritesheetUrl, rotationUrls };
       });
       setCharacters(chars);
       if (chars.length > 0) setSelectedCharId(chars[0].id);
       const thumbEntries = await Promise.all(
         chars.map(async (char) => {
+          // V2 character: use south rotation image as thumbnail (fast, no canvas)
+          if (char.rotationUrls?.south) return [char.id, char.rotationUrls.south] as const;
           if (char.character.layers.length === 0) return [char.id, ""] as const;
           try {
             const cache = await preRenderCompositeFrames(char.character.layers);
@@ -926,9 +967,22 @@ export default function BuilderMode() {
     const char = characters.find((c) => c.id === activeId);
     if (!char) return;
     charFrameCacheRef.current.clear();
-    preRenderCompositeFrames(char.character.layers).then((cache) => {
-      charFrameCacheRef.current = cache;
-    });
+    const layersToRender = char.equippedSpritesheetUrl
+      ? [{ id: "equipped", name: "equipped", spritesheet: char.equippedSpritesheetUrl, zIndex: 0 }]
+      : char.character.layers;
+    if (layersToRender.length > 0) {
+      preRenderCompositeFrames(layersToRender).then((cache) => {
+        charFrameCacheRef.current = cache;
+      });
+    } else if (char.rotationUrls) {
+      // V2 idle-only: build a static 4-direction fake spritesheet from rotation images
+      buildFakeSpritesheetFromRotations(char.rotationUrls).then((fakeSpritesheet) => {
+        const fakeLayer = { id: "v2_idle", name: "base", spritesheet: fakeSpritesheet, zIndex: 0 };
+        preRenderCompositeFrames([fakeLayer]).then((cache) => {
+          charFrameCacheRef.current = cache;
+        });
+      });
+    }
   }, [playerEquippedId, playerCharId, selectedCharId, characters, equippedChars]);
 
   // ── Transition helpers ────────────────────────────────────────────────────────

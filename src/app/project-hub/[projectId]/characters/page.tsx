@@ -164,7 +164,7 @@ export default function CharactersPage() {
 
   // ── Generate new character form ───────────────────────────────────────────
   const [description, setDescription]       = useState("");
-  const [charName, setCharName]             = useState("New Character");
+  const [charName, setCharName]             = useState("");
   const [isGenerating, setIsGenerating]     = useState(false);
   const [genError, setGenError]             = useState<string | null>(null);
   const [genResult, setGenResult]           = useState<{ character_id: string } & RotationUrls | null>(null);
@@ -464,6 +464,21 @@ export default function CharactersPage() {
 
             <div className="flex flex-col gap-1">
               <label className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
+                Character Name
+              </label>
+              <input
+                type="text"
+                value={charName}
+                maxLength={30}
+                onChange={(e) => setCharName(e.target.value)}
+                placeholder="e.g. Aria, Sir Roland, Dark Mage…"
+                disabled={isGenerating}
+                className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-purple-400 disabled:opacity-50"
+              />
+            </div>
+
+            <div className="flex flex-col gap-1">
+              <label className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
                 Description
               </label>
               <textarea
@@ -499,7 +514,7 @@ export default function CharactersPage() {
               <p className="text-center text-sm text-red-500">{genError}</p>
             )}
 
-            {/* Direction previews + save form */}
+            {/* Direction previews + save */}
             {genResult && !isGenerating && (
               <div className="flex flex-col gap-4 rounded-xl border border-gray-100 bg-gray-50 p-4">
                 <p className="text-center text-[10px] font-bold uppercase tracking-wider text-gray-400">
@@ -518,26 +533,12 @@ export default function CharactersPage() {
                     </div>
                   ))}
                 </div>
-
-                <div className="flex flex-col gap-1">
-                  <label className="text-[10px] font-bold uppercase tracking-wider text-gray-400">
-                    Character Name
-                  </label>
-                  <input
-                    type="text"
-                    value={charName}
-                    maxLength={30}
-                    onChange={(e) => setCharName(e.target.value)}
-                    className="rounded-lg border border-gray-300 px-3 py-2 text-sm focus:outline-none focus:ring-1 focus:ring-purple-400"
-                  />
-                </div>
-
                 <button
                   onClick={handleSave}
                   disabled={isSaving}
                   className="rounded-xl bg-green-600 py-2.5 text-sm font-medium text-white hover:bg-green-700 disabled:opacity-60 transition-colors"
                 >
-                  {isSaving ? "Saving…" : "Save Character"}
+                  {isSaving ? "Saving…" : `Save "${charName.trim() || "Character"}"`}
                 </button>
               </div>
             )}
